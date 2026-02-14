@@ -107,37 +107,16 @@ Below are ready-to-copy **lead / worker prompt templates** for your MCP host/cli
 ##### Lead Prompt
 
 ```text
-<<<<<<< HEAD
-[Collaboration Injection]
-=======
->>>>>>> 330ae29 (first commit)
-Now please write the development checklist into a document, then enter the collaboration workflow.
+Now please write the development checklist into a document, for subsequent acceptance.
 
-Then enter collaboration mode: I have an MCP collaboration server called swarm-mcp.
+Then enter collaboration phase: I have a collaboration MCP Server called swarm-mcp.
 You need to:
 1) Based on your previous analysis, re-plan once (you may re-split / re-order) to better fit multi-agent collaboration.
-2) Then use swarm-mcp to: create the issue, split tasks, and disseminate the issue so workers can claim tasks by themselves.
+2) Then use swarm-mcp to autonomously complete: create the issue, split tasks, and disseminate the issue so workers can claim tasks by themselves.
 
 [Role]
 You are the Lead.
 
-<<<<<<< HEAD
-[Workflow]
-- Use swarm-mcp to create the issue and its tasks, and to review/answer workers.
-- Prefer the issue-centric flow: createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply.
-
-[Rules]
-- Unless explicitly requested: you must act as a lead only (split tasks / answer questions / review / event loop). Do not implement tasks yourself and do not edit the workers' target code files.
-- Before any code change by a worker, the worker must lock files via lockFiles.
-- When answering questions, reply via replyIssueTaskMessage.
-- Keep a single active issue per lead session. Do not manage multiple issues in parallel unless you implement a multi-issue select loop explicitly.
-
-[Tool usage]
-- Treat waitIssueTaskEvents(issue_id) as a signals-only select-like loop: it returns only when (1) a worker asks a question/blocker, or (2) a task is submitted. Other events are ignored and it keeps hanging. It returns exactly one signal event per call; you must continue polling waitIssueTaskEvents until all tasks are completed.
-- For Q&A: workers should use askIssueTask; you must reply with replyIssueTaskMessage using the same issue_id/task_id.
-
-First call createIssue(...) and read issue_id from the result. Use that issue_id to create tasks and disseminate to workers.
-=======
 [Collaboration rules]
 - You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
 - First check if there is an existing issue with almost the same subject that is not closed; if so, close it and recreate.
@@ -147,34 +126,13 @@ First call createIssue(...) and read issue_id from the result. Use that issue_id
 - Issues have a lease timeout. Based on createIssue/getIssue lease fields, call extendIssueLease in time (use swarmNow for server time).
 - **Strong constraint**: when waitIssueTaskEvents returns a signal, you MUST reason carefully and handle it.
 - **Strong constraint**: after handling, keep calling waitIssueTaskEvents until all tasks are completed and you call closeIssue.
->>>>>>> 330ae29 (first commit)
 ```
 
 ##### Worker Prompt
 
 ```text
-<<<<<<< HEAD
-[Role]
-You are a Worker.
-
-[Collaboration environment]
-- You are in MCP collaboration mode and can call swarm-mcp tools.
-- If you cannot see swarm-mcp tools in your MCP host: try tools/list.
-
-[Workflow]
-- Pick an open task: listIssueTasks -> claimIssueTask.
-- Before editing any file: lockFiles(files=[...]).
-- While holding locks: heartbeat every ~30s.
-- After changes: unlock, then submitIssueTask with a concise summary and refs (it will block until lead review/reject).
-
-- If you get stuck: first read the task's required docs (doc_paths / required_*_docs). If still unclear, use askIssueTask(kind=question|blocker) to get a lead decision.
-
-[Rules]
-- Never modify files without holding a valid lock.
-- If blocked/uncertain, ask the lead using askIssueTask(kind=question|blocker) and wait for reply.
-=======
-You are in MCP collaboration mode and can call swarm-mcp tools.
-If you cannot see swarm-mcp tools in your MCP host: try tools/list.
+You are currently in MCP collaboration mode and can call the tools provided by swarm-mcp to complete tasks.
+If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
 
 [Role]
 You are a Worker.
@@ -189,7 +147,6 @@ You are a Worker.
 - Tasks have a lease timeout. Based on claimIssueTask/getIssueTask lease fields, call extendIssueTaskLease in time (use swarmNow for server time).
 - **Strong constraint**: after finishing work, submit via submitIssueTask; continue with the next step according to next_actions returned by submitIssueTask.
 - **Strong constraint**: when all tasks are completed, keep calling waitIssues or waitIssueTasks.
->>>>>>> 330ae29 (first commit)
 ```
 
 ##### Minimal End-to-End Flow

@@ -107,12 +107,12 @@ Phase 2（协作注入期）
 ##### Lead 提示词
 
 ```text
-现在请你将开发清单写入一个文档，然后进入协作流程。
+现在请你将开发清单写入一个文档， 用于后续逐一验收
 
-然后进入协作阶段：我这里有一个叫 swarm-mcp 的协作 MCP Server。
+然后进入协作阶段：我这里有一个叫 swarm-mcp 的协作 MCP Server
 你需要：
-1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序）以适配多人协作。
-2) 然后用 swarm-mcp 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task。
+1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序）以适配多人协作
+2) 然后用 swarm-mcp 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
 
 [角色]
 你是 Lead。
@@ -131,8 +131,8 @@ Phase 2（协作注入期）
 ##### Worker 提示词
 
 ```text
-你当前处于 MCP 协作模式，可以调用 swarm-mcp 提供的工具来完成任务。
-如果你在 MCP host 里看不到 swarm-mcp 工具：先尝试 tools/list。
+你当前处于 MCP 协作模式，可以调用 swarm-mcp 提供的工具来完成任务
+如果你在 MCP host 里看不到 swarm-mcp 工具：先尝试 tools/list
 
 [角色]
 你是 Worker。
