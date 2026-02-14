@@ -2,6 +2,8 @@
 
 一个用于多窗口多智能体协作的本地 MCP Server（stdio 模式），可接入任意兼容 MCP 的客户端（MCP host）。
 
+[English](README.en.md) | **中文**
+
 本项目采用 **issue-centric** 协作模型：
 
 - **Issue**：一个主问题（工作池容器）

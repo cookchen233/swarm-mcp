@@ -2,6 +2,8 @@
 
 A local MCP server (stdio) for multi-window, multi-agent collaboration, usable from any MCP-compatible host/client.
 
+**English** | [中文](README.md)
+
 This project implements an **issue-centric** workflow:
 
 - **Issue**: the main problem (a shared pool container)
