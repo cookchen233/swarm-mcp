@@ -7,7 +7,7 @@ A local MCP server (stdio) for multi-window, multi-agent collaboration, usable f
 This project implements an **issue-centric** workflow:
 
 - **Issue**: the main problem (a shared pool container)
-- **Task**: a claimable work unit under an issue (not assigned to a fixed worker)
+- **Task**: a claimable work unit under an issue
 - Collaboration happens via an **event stream** (long-poll)
 - File changes are coordinated with **lease-based file locks**
 - Context is shared through a **docs library**
@@ -63,8 +63,8 @@ Message linkage:
 
 - MCP tool calls are explicit-parameter by default; this server does not keep an implicit “current issue/task context”.
 - If you forget IDs, recover by:
-  - `listIssues` / `getIssue`
-  - `listIssueTasks(issue_id)` / `getIssueTask`
+  - `listIssues(status=...)` / `listOpenedIssues` / `getIssue`
+  - `listIssueTasks(issue_id, status=...)` / `listIssueOpenedTasks(issue_id)` / `getIssueTask`
 
 In addition, this server introduces a **strongly required `session_id`** as a window/session isolation token (cookie-like semantics):
 
@@ -126,6 +126,11 @@ You are the Lead.
 - Issues have a lease timeout. Based on createIssue/getIssue lease fields, call extendIssueLease in time (use swarmNow for server time).
 - **Strong constraint**: when waitIssueTaskEvents returns a signal, you MUST reason carefully and handle it.
 - **Strong constraint**: after handling, keep calling waitIssueTaskEvents until all tasks are completed and you call closeIssue.
+- **Acceptance closed-loop**: when all tasks are completed, you must deliver to the acceptor by calling deliverDelivery(issue_id, summary=...).
+  - deliverDelivery MUST include structured artifacts (at least test_result=passed|failed, test_cases[...], changed_files[...], reviewed_refs[...])
+  - changed_files is validated only by a minimum-count rule: changed_files count must be >= the de-duplicated union size of changed files submitted by completed tasks; errors do not reveal missing details (to encourage lead self-review).
+  - deliverDelivery will block until the acceptor calls reviewDelivery and returns a conclusion (approved / rejected)
+  - If verdict=rejected: organize fixes and re-deliver (call deliverDelivery again) until approved or you explicitly end the issue
 ```
 
 ##### Worker Prompt
@@ -139,7 +144,7 @@ You are a Worker.
 
 [Collaboration rules]
 - You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
-- Claim tasks: listIssueTasks -> find open -> claimIssueTask.
+- Claim tasks: listOpenedIssues -> listIssueOpenedTasks -> claimIssueTask.
 - When you see no open issues or tasks, call waitIssues or waitIssueTasks immediately.
 - Before starting, read context: prioritize task doc_paths / required_*_docs via readIssueDoc / readTaskDoc.
 - Before editing: lockFiles(files=[...]). Without a valid lockFiles lease, do not modify any file. While holding locks, heartbeat every ~30s. After finishing, unlock.
@@ -147,6 +152,24 @@ You are a Worker.
 - Tasks have a lease timeout. Based on claimIssueTask/getIssueTask lease fields, call extendIssueTaskLease in time (use swarmNow for server time).
 - **Strong constraint**: after finishing work, submit via submitIssueTask; continue with the next step according to next_actions returned by submitIssueTask.
 - **Strong constraint**: when all tasks are completed, keep calling waitIssues or waitIssueTasks.
+```
+
+##### Acceptor Prompt
+
+```text
+You are currently in MCP collaboration mode and can call the tools provided by swarm-mcp to complete acceptance.
+If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
+
+[Role]
+You are the Acceptor.
+
+[Collaboration rules]
+- You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
+- Review flow: waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle(issue_id) -> reviewDelivery.
+- If there are no open deliveries, call waitDeliveries(status=open) and keep waiting.
+- After receiving a delivery:
+  - Use delivery.issue_id to call getIssueAcceptanceBundle(issue_id) to pull full context (issue + all tasks + docs content + events).
+  - After review, call reviewDelivery(delivery_id, verdict=approved|rejected, feedback=...) to provide the acceptance conclusion.
 ```
 
 ##### Minimal End-to-End Flow
@@ -157,10 +180,15 @@ Some tools are intentionally blocking (hanging) to support passive event loops a
 
 | Tool | Blocks? | Returns when | Default / fixed timeout | Notes |
 | --- | --- | --- | --- | --- |
-| `waitIssueTaskEvents(issue_id)` | Yes | Signals only: `question/blocker` or `issue_task_submitted` | Fixed 600s | Lead passive loop; returns at most 1 signal event per call; ignores other events and keeps hanging |
-| `submitIssueTask(issue_id, task_id, ...)` | Yes | After submitting, until lead review produces `reviewed/resolved` events | Fixed 600s | Submission must include structured `artifacts`; prevents workers from exiting immediately after submitting |
-| `askIssueTask(issue_id, task_id, ...)` | Yes | Lead replies via `replyIssueTaskMessage` | Default 600s (configurable) | Posts `question/blocker` first, then waits for reply |
+| `waitIssueTaskEvents(issue_id)` | Yes | Signals only: `question/blocker` or `issue_task_submitted` | Fixed 3600s | Lead passive loop; returns at most 1 signal event per call; ignores other events and keeps hanging |
+| `deliverDelivery(issue_id, ...)` | Yes | After delivery, until acceptor `reviewDelivery` returns a conclusion | Default 3600s (configurable) | Lead delivers to acceptor; MUST provide structured `artifacts` (at least `test_result`/`test_cases`/`changed_files`/`reviewed_refs`) |
+| `waitDeliveries(status=open, ...)` | Yes | Returns immediately if matching deliveries exist, otherwise waits until one appears (or timeout) | Default 3600s (configurable) | Acceptor passive loop; returns deliveries list (usually take the first one) |
+| `submitIssueTask(issue_id, task_id, ...)` | Yes | After submitting, until lead review produces `reviewed/resolved` events | Fixed 3600s | Submission must include structured `artifacts`; prevents workers from exiting immediately after submitting |
+| `askIssueTask(issue_id, task_id, ...)` | Yes | Lead replies via `replyIssueTaskMessage` | Default 3600s (configurable) | Posts `question/blocker` first, then waits for reply |
 | `lockFiles(...)` | Sometimes | Returns when lock acquired; waits up to `wait_sec` if busy | `wait_sec` | Not infinite; fails on timeout |
+| `reopenIssue(issue_id, ...)` | No | Returns immediately on success | - | Only allowed when the issue is `done/canceled`; reopens the issue for another review cycle |
+
+> **Important**: All blocking interfaces have a minimum timeout of 3600 seconds (1 hour). Values smaller than 3600s will be automatically enforced to the minimum. This prevents AI from intentionally passing short parameters to end sessions early, ensuring collaboration continuity. Customize via `SWARM_MCP_DEFAULT_TIMEOUT_SEC` environment variable.
 
 Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no conflicts across issues).
 
@@ -169,9 +197,9 @@ Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no confl
    - `createIssueTask(issue_id, subject="...", description="...", difficulty="easy|medium|focus", context_task_ids=[...], suggested_files=[...], spec={name:"spec", split_from:"...", split_reason:"...", impact_scope:"...", context_task_ids:[...], goal:"...", rules:"...", constraints:"...", conventions:"...", acceptance:"..."})`
 
 2. **Worker claims and implements**
-   - (Optional) If the lead has not created any issues yet, call `waitIssues(after_count=0, timeout_sec=600)` to block until an issue exists
-   - (Optional) If you already know `issue_id` but the lead has not created any tasks yet, call `waitIssueTasks(issue_id, after_count=0, timeout_sec=600)` to block until a task exists
-   - `listIssueTasks(issue_id)` -> find an `open` task
+   - (Optional) If the lead has not created any issues yet, call `waitIssues(timeout_sec=3600)` to block until an issue exists
+   - (Optional) If you already know `issue_id` but the lead has not created any tasks yet, call `waitIssueTasks(issue_id, timeout_sec=3600)` to block until a task exists
+   - `listIssueOpenedTasks(issue_id)`
    - `claimIssueTask(issue_id, task_id)` (if the task is reserved by lead, you MUST provide `next_step_token`)
    - `lockFiles(task_id, files=["path/to/file.go"], ttl_sec=120, wait_sec=60)`
    - (implement changes; `heartbeat(lease_id)` while holding)
@@ -180,9 +208,9 @@ Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no confl
 
    The worker should run this as a loop:
 
-   - Do not end the conversation after `submitIssueTask` returns. The response includes `next_actions`; continue by executing those actions (e.g. `listIssueTasks` / `claimIssueTask`) to pick up the next work item.
+   - Do not end the conversation after `submitIssueTask` returns. The response includes `next_actions`; continue by executing those actions (e.g. `listIssueOpenedTasks` / `claimIssueTask`) to pick up the next work item.
    - Repeat “claim -> lock -> implement -> submit” until:
-     - `listIssueTasks(issue_id, status="open")` is empty (no claimable tasks), or
+     - `listIssueOpenedTasks(issue_id)` is empty (no claimable tasks), or
      - the lead explicitly ends the issue / stops dispatching tasks.
 
 3. **Lead reviews or rejects**
@@ -191,7 +219,7 @@ Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no confl
    - `reviewIssueTask(issue_id, task_id, verdict="approved|rejected", feedback="...", completion_score=1|2|5, artifacts={review_summary:"...", reviewed_refs:[...]}, feedback_details=[...], next_step_token="...")`
 
 4. **Q&A (recommended in strict mode)**
-   - Worker: `askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=600)`
+   - Worker: `askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=3600)`
    - Lead: `replyIssueTaskMessage(issue_id, task_id, content="...")`
 
 ## Build & Run
@@ -279,7 +307,7 @@ $SWARM_MCP_ROOT/
 
 ### Worker window
 
-1. `listIssueTasks` -> find an `open` task
+1. `listIssueOpenedTasks` -> find an `open` task
 2. `claimIssueTask`
 3. `lockFiles` (always lock before editing)
 4. Implement changes (`heartbeat` while holding locks)
@@ -322,7 +350,7 @@ Each window has its own `member_id` (via `whoAmI`) for audit/traceability.
 
 ### Step 3: Worker Claims and Implements
 
-- `listIssueTasks` -> pick an `open` task
+- `listIssueOpenedTasks`
 - `claimIssueTask`
 - (optional) `extendIssueTaskLease` (extend task lease to avoid it being auto-reopened to `open`)
 - `lockFiles` (lock the files for this task)
@@ -467,8 +495,8 @@ Recommended pattern:
 ## Key Tools (Summary)
 
 - Issue / Task
-  - `createIssue`, `listIssues`, `getIssue`
-  - `createIssueTask`, `listIssueTasks`, `getIssueTask`
+  - `createIssue`, `listIssues` (supports status/subject_contains/pagination/sorting), `listOpenedIssues`, `getIssue`
+  - `createIssueTask`, `listIssueTasks` (supports status/subject_contains/claimed_by/submitter/pagination/sorting), `listIssueOpenedTasks`, `getIssueTask`
   - `claimIssueTask`, `submitIssueTask`, `reviewIssueTask`
   - `waitIssueTaskEvents`
   - `askIssueTask`, `replyIssueTaskMessage`

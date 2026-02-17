@@ -8,6 +8,46 @@ import (
 	"path/filepath"
 )
 
+func (s *IssueService) ReadAllEvents(issueID string) ([]IssueEvent, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue_id is required")
+	}
+	if !s.store.Exists("issues", issueID, "issue.json") {
+		return nil, fmt.Errorf("issue '%s' not found", issueID)
+	}
+
+	eventsPath := s.store.Path("issues", issueID, "events.jsonl")
+	f, err := os.Open(eventsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []IssueEvent{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 1024*1024)
+	scanner.Buffer(buf, 16*1024*1024)
+
+	out := make([]IssueEvent, 0, 64)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var ev IssueEvent
+		if err := json.Unmarshal(line, &ev); err != nil {
+			continue
+		}
+		out = append(out, ev)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *IssueService) appendEventLocked(issueID string, ev IssueEvent) error {
 	metaPath := s.store.Path("issues", issueID, "meta.json")
 	var meta issueMeta

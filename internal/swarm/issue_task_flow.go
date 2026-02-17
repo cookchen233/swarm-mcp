@@ -300,7 +300,7 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 		return nil, err
 	}
 
-	const waitReviewTimeoutSec = 600
+	// waitReviewTimeoutSec will be set dynamically based on service configuration
 	var submitSeq int64
 	err := s.store.WithLock(func() error {
 		task, err := s.loadTaskLocked(issueID, taskID)
@@ -331,7 +331,7 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 	}
 
 	s.bump(issueID)
-	deadline := time.Now().Add(time.Duration(waitReviewTimeoutSec) * time.Second)
+	deadline := time.Now().Add(time.Duration(s.defaultTimeoutSec) * time.Second)
 	after := submitSeq
 	for {
 		remaining := time.Until(deadline)
@@ -517,40 +517,42 @@ func (s *IssueService) CountTasks(issueID string) (int, error) {
 	return len(files), nil
 }
 
-// WaitIssueTasks blocks until the task count under an issue becomes > afterCount.
-// - If afterCount < 0, it uses the current count as the baseline (tail semantics).
-// - If timeoutSec <= 0, defaults to 600.
-// Cross-process friendly long-poll: polls filesystem periodically.
-func (s *IssueService) WaitIssueTasks(issueID string, afterCount, timeoutSec int) ([]IssueTask, int, error) {
+// WaitIssueTasks blocks until at least one task matching status exists under an issue.
+// - If tasks exist immediately, returns them without waiting.
+// - status defaults to "open" if empty.
+// - If timeoutSec <= 0, defaults to 3600.
+func (s *IssueService) WaitIssueTasks(issueID, status string, timeoutSec, limit int) ([]IssueTask, error) {
 	if issueID == "" {
-		return nil, 0, fmt.Errorf("issue_id is required")
+		return nil, fmt.Errorf("issue_id is required")
 	}
 	s.SweepExpired()
-	if timeoutSec <= 0 {
-		timeoutSec = 600
+	if strings.TrimSpace(status) == "" {
+		status = IssueTaskOpen
 	}
-	if afterCount < 0 {
-		tasks, err := s.ListTasks(issueID, IssueTaskOpen)
-		if err != nil {
-			return nil, 0, err
-		}
-		afterCount = len(tasks)
+	if timeoutSec <= 0 {
+		timeoutSec = s.defaultTimeoutSec
+	}
+	if limit <= 0 {
+		limit = 50
 	}
 
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	poll := 200 * time.Millisecond
 	for {
 		s.SweepExpired()
-		tasks, err := s.ListTasks(issueID, IssueTaskOpen)
+		tasks, err := s.ListTasks(issueID, status)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
-		if len(tasks) > afterCount {
-			return tasks, len(tasks), nil
+		if len(tasks) > 0 {
+			if len(tasks) > limit {
+				tasks = tasks[:limit]
+			}
+			return tasks, nil
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return tasks, len(tasks), nil
+			return []IssueTask{}, nil
 		}
 		if remaining < poll {
 			time.Sleep(remaining)

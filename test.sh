@@ -60,7 +60,7 @@ call() {
     local params="$3"
     trash "$RESP_DIR/$id.json" >/dev/null 2>&1 || true
     echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"method\":\"$method\",\"params\":$params}" >&$MCP_IN_FD
-    for _ in $(seq 1 500); do
+    for _ in $(seq 1 4000); do
         if [ -f "$RESP_DIR/$id.json" ]; then
             cat "$RESP_DIR/$id.json"
             return 0
@@ -81,7 +81,7 @@ call_async() {
 
 wait_resp() {
     local id="$1"
-    for _ in $(seq 1 1000); do
+    for _ in $(seq 1 4000); do
         if [ -f "$RESP_DIR/$id.json" ]; then
             cat "$RESP_DIR/$id.json"
             return 0
@@ -192,7 +192,7 @@ echo ""
 
 # --- Test 2.1: Worker can wait for issues before lead creates any ---
 echo "[Test 2.1] Wait Issues (blocks until issue exists)"
-tool_call_async 92 "waitIssues" "$WORKER_SESSION" '{"after_count":0,"timeout_sec":5}'
+tool_call_async 92 "waitIssues" "$WORKER_SESSION" '{"timeout_sec":5}'
 sleep 1
 
 # --- Test 2: Tools List ---
@@ -205,6 +205,17 @@ assert_contains "lists waitIssueTaskEvents tool" "$resp" "waitIssueTaskEvents"
 assert_contains "lists docs tools" "$resp" "writeSharedDoc"
 assert_contains "lists worker tools" "$resp" "registerWorker"
 assert_contains "lists issue pool tools" "$resp" "listIssues"
+assert_contains "lists listOpenedIssues tool" "$resp" "listOpenedIssues"
+assert_contains "lists listIssueOpenedTasks tool" "$resp" "listIssueOpenedTasks"
+
+assert_contains "lists deliverDelivery tool" "$resp" "deliverDelivery"
+assert_contains "lists claimDelivery tool" "$resp" "claimDelivery"
+assert_contains "lists extendDeliveryLease tool" "$resp" "extendDeliveryLease"
+assert_contains "lists waitDeliveries tool" "$resp" "waitDeliveries"
+assert_contains "lists reviewDelivery tool" "$resp" "reviewDelivery"
+assert_contains "lists getDelivery tool" "$resp" "getDelivery"
+assert_contains "lists listOpenedDeliveries tool" "$resp" "listOpenedDeliveries"
+
 assert_contains "lists askIssueTask tool" "$resp" "askIssueTask"
 assert_not_contains "strict mode hides postIssueTaskMessage" "$resp" "postIssueTaskMessage"
 echo ""
@@ -228,13 +239,22 @@ echo ""
 
 # --- Test 3.1: Worker can wait for tasks before lead creates any ---
 echo "[Test 3.1] Wait Issue Tasks (blocks until task exists)"
-tool_call_async 93 "waitIssueTasks" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"after_count\":0,\"timeout_sec\":5}"
+tool_call_async 93 "waitIssueTasks" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"timeout_sec\":5}"
 sleep 1
 
 # --- Test 4: Issue pool listing ---
 echo "[Test 4] List Issues"
 resp=$(tool_call 4 "listIssues" "$WORKER_SESSION" '{}')
 assert_contains "lists issues" "$resp" "$ISSUE_ID"
+
+resp=$(tool_call 4001 "listIssues" "$WORKER_SESSION" '{"status":"open"}')
+assert_contains "listIssues(status=open) includes issue" "$resp" "$ISSUE_ID"
+
+resp=$(tool_call 4002 "listIssues" "$WORKER_SESSION" '{"status":"all","subject_contains":"Test Issue","limit":1,"offset":0,"sort_by":"created_at","sort_order":"desc"}')
+assert_contains "listIssues(subject_contains) includes issue" "$resp" "$ISSUE_ID"
+
+resp=$(tool_call 4003 "listOpenedIssues" "$WORKER_SESSION" '{}')
+assert_contains "listOpenedIssues includes issue" "$resp" "$ISSUE_ID"
 echo ""
 
 # --- Test 5: Get Issue ---
@@ -273,6 +293,16 @@ if [ -z "$TASK_ID" ]; then
     exit 1
 fi
 echo "  (task_id=$TASK_ID)"
+
+echo "[Test 8.0] List Issue Tasks filters"
+resp=$(tool_call 801 "listIssueTasks" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"status\":\"open\"}")
+assert_contains "listIssueTasks(status=open) includes task" "$resp" "$TASK_ID"
+
+resp=$(tool_call 802 "listIssueTasks" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"status\":\"all\",\"subject_contains\":\"Implement auth module\",\"limit\":1,\"offset\":0,\"sort_by\":\"created_at\",\"sort_order\":\"desc\"}")
+assert_contains "listIssueTasks(subject_contains) includes task" "$resp" "$TASK_ID"
+
+resp=$(tool_call 803 "listIssueOpenedTasks" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\"}")
+assert_contains "listIssueOpenedTasks includes task" "$resp" "$TASK_ID"
 
 WAIT_TASKS_RESP=$(wait_resp 93)
 assert_contains "waitIssueTasks returns task" "$WAIT_TASKS_RESP" "$TASK_ID"
@@ -428,9 +458,21 @@ resp=$(tool_call 29 "closeIssue" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"
 assert_contains "issue closed" "$resp" "\\\"status\\\": \\\"done\\\""
 echo ""
 
+# --- Test 15.6: deliverDelivery rejects insufficient changed_files (no leak) ---
+echo "[Test 15.6] deliverDelivery rejects insufficient changed_files (no leak)"
+
+# This issue has 2 done tasks with submission_artifacts.changed_files union size == 2.
+# Provide only 1 changed_file; deliverDelivery should fail and must NOT leak which file is missing.
+resp=$(tool_call 40 "deliverDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"summary\":\"deliver-insufficient\",\"artifacts\":{\"test_result\":\"passed\",\"test_cases\":[\"go test ./...\"],\"changed_files\":[\"only-one.go\"],\"reviewed_refs\":[\"README.md\"]},\"timeout_sec\":5}")
+assert_contains "deliverDelivery rejected" "$resp" "insufficient"
+assert_not_contains "no leak missing file 1" "$resp" "auth/handler.go"
+assert_not_contains "no leak missing file 2" "$resp" "auth/service.go"
+
+echo ""
+
 # --- Test 16: Lock Files ---
 echo "[Test 16] Lock Files"
-resp=$(tool_call 20 "lockFiles" "$WORKER_SESSION" "{\"task_id\":\"$TASK_ID\",\"files\":[\"auth/handler.go\"],\"ttl_sec\":60}")
+resp=$(tool_call 43 "lockFiles" "$WORKER_SESSION" '{"files":["internal/mcp/server.go"],"wait_sec":1}')
 assert_contains "lock acquired" "$resp" "lease_id"
 LEASE_ID=$(echo "$resp" | grep -oE 'l_[0-9]+_[0-9a-f]+' | head -1)
 echo "  (lease_id=$LEASE_ID)"
@@ -499,6 +541,115 @@ sleep 2
 resp=$(tool_call 47 "getIssueTask" "$LEAD_SESSION" "{\"issue_id\":\"$EXP2_ISSUE_ID\",\"task_id\":\"$EXP_TASK_ID\"}")
 assert_contains "task reopened" "$resp" "\\\"status\\\": \\\"open\\\""
 
+echo ""
+
+# --- Test 22: Issue Delivery & Acceptance (blocking) ---
+echo "[Test 22] Issue Delivery & Acceptance (blocking)"
+
+resp=$(tool_call 2200 "openSession" "$LEAD_SESSION" '{}')
+ACCEPTOR_SESSION=$(echo "$resp" | grep -oE 'sess_[0-9]+_[0-9a-f]+' | head -1)
+echo "  (acceptor_session=$ACCEPTOR_SESSION)"
+
+resp=$(tool_call 2201 "createIssue" "$LEAD_SESSION" '{"subject":"Acceptance Issue","description":"For acceptance tests","user_issue_doc":{"name":"user","content":"u"},"lead_issue_doc":{"name":"lead","content":"l"}}')
+ACC_ISSUE_ID=$(echo "$resp" | grep -oE 'issue_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$ACC_ISSUE_ID" ]; then
+    echo "FAILED to parse ACC_ISSUE_ID from response: $resp"
+    exit 1
+fi
+echo "  (issue_id=$ACC_ISSUE_ID)"
+
+tool_call_async 2202 "waitDeliveries" "$ACCEPTOR_SESSION" '{"status":"open","timeout_sec":20}'
+sleep 1
+
+tool_call_async 2203 "deliverDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ACC_ISSUE_ID\",\"summary\":\"deliver-1\",\"artifacts\":{\"test_result\":\"passed\",\"test_cases\":[\"bash test.sh\"],\"reviewed_refs\":[\"test.sh (Test 22/23)\"],\"changed_files\":[\"internal/swarm/delivery.go\"],\"test_output\":\"ok\"},\"timeout_sec\":20}"
+
+WAIT_DELIVERY_RESP=$(wait_resp 2202)
+assert_contains "acceptor receives delivery" "$WAIT_DELIVERY_RESP" "delivery_"
+
+DELIVERY_ID=$(echo "$WAIT_DELIVERY_RESP" | grep -oE 'delivery_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$DELIVERY_ID" ]; then
+    echo "FAILED to parse DELIVERY_ID from response: $WAIT_DELIVERY_RESP"
+    exit 1
+fi
+
+resp=$(tool_call 2204 "claimDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY_ID\"}")
+assert_contains "acceptor claims delivery" "$resp" "in_review"
+assert_contains "claim sets claimed_by" "$resp" "claimed_by"
+
+resp=$(tool_call 2205 "reviewDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY_ID\",\"verdict\":\"approved\"}")
+assert_contains "acceptor approves" "$resp" "approved"
+
+DELIVER_BLOCK_RESP=$(wait_resp 2203)
+assert_contains "deliverDelivery unblocked" "$DELIVER_BLOCK_RESP" "reviewed"
+echo ""
+
+# --- Test 21.6: Reopen Issue ---
+echo "[Test 21.6] Reopen Issue"
+
+resp=$(tool_call 2150 "createIssue" "$LEAD_SESSION" '{"subject":"Reopen Issue","description":"For reopen tests","user_issue_doc":{"name":"user","content":"u"},"lead_issue_doc":{"name":"lead","content":"l"}}')
+REOPEN_ISSUE_ID=$(echo "$resp" | grep -oE 'issue_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$REOPEN_ISSUE_ID" ]; then
+    echo "FAILED to parse REOPEN_ISSUE_ID from response: $resp"
+    exit 1
+fi
+
+resp=$(tool_call 2151 "closeIssue" "$LEAD_SESSION" "{\"issue_id\":\"$REOPEN_ISSUE_ID\",\"summary\":\"close-for-reopen\"}")
+assert_contains "close for reopen" "$resp" "\\\"status\\\": \\\"done\\\""
+
+resp=$(tool_call 2152 "reopenIssue" "$LEAD_SESSION" "{\"issue_id\":\"$REOPEN_ISSUE_ID\",\"summary\":\"reopen-for-review\"}")
+assert_contains "reopen ok" "$resp" "\\\"status\\\": \\\"open\\\""
+assert_contains "reopen has lease" "$resp" "lease_expires_at"
+
+echo ""
+
+# --- Test 23: Acceptance Reject blocks until re-delivery ---
+echo "[Test 23] Acceptance Reject blocks until re-delivery"
+
+tool_call_async 2301 "waitDeliveries" "$ACCEPTOR_SESSION" '{"status":"open","timeout_sec":20}'
+sleep 1
+
+tool_call_async 2302 "deliverDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ACC_ISSUE_ID\",\"summary\":\"deliver-2\",\"artifacts\":{\"test_result\":\"passed\",\"test_cases\":[\"bash test.sh\"],\"reviewed_refs\":[\"test.sh (Test 22/23)\"],\"changed_files\":[\"internal/swarm/delivery.go\"],\"test_output\":\"ok\"},\"timeout_sec\":20}"
+
+WAIT_DELIVERY2_RESP=$(wait_resp 2301)
+assert_contains "acceptor receives delivery-2" "$WAIT_DELIVERY2_RESP" "delivery_"
+
+DELIVERY2_ID=$(echo "$WAIT_DELIVERY2_RESP" | grep -oE 'delivery_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$DELIVERY2_ID" ]; then
+    echo "FAILED to parse DELIVERY2_ID from response: $WAIT_DELIVERY2_RESP"
+    exit 1
+fi
+
+resp=$(tool_call 2303 "claimDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY2_ID\"}")
+assert_contains "acceptor claims delivery-2" "$resp" "in_review"
+
+resp=$(tool_call 2307 "reviewDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY2_ID\",\"verdict\":\"rejected\",\"feedback\":\"need-fix\"}")
+assert_contains "acceptor rejects delivery-2" "$resp" "rejected"
+
+DELIVER2_BLOCK_RESP=$(wait_resp 2302)
+assert_contains "deliverDelivery unblocked by rejection" "$DELIVER2_BLOCK_RESP" "reviewed"
+
+tool_call_async 2304 "waitDeliveries" "$ACCEPTOR_SESSION" '{"status":"open","timeout_sec":20}'
+sleep 1
+
+tool_call_async 2305 "deliverDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ACC_ISSUE_ID\",\"summary\":\"deliver-3\",\"artifacts\":{\"test_result\":\"passed\",\"test_cases\":[\"bash test.sh\"],\"reviewed_refs\":[\"test.sh (Test 22/23)\"],\"changed_files\":[\"internal/swarm/delivery.go\"],\"test_output\":\"ok\"},\"timeout_sec\":20}"
+
+WAIT_DELIVERY3_RESP=$(wait_resp 2304)
+assert_contains "acceptor receives delivery-3" "$WAIT_DELIVERY3_RESP" "delivery_"
+
+DELIVERY3_ID=$(echo "$WAIT_DELIVERY3_RESP" | grep -oE 'delivery_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$DELIVERY3_ID" ]; then
+    echo "FAILED to parse DELIVERY3_ID from response: $WAIT_DELIVERY3_RESP"
+    exit 1
+fi
+
+resp=$(tool_call 2306 "claimDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY3_ID\"}")
+assert_contains "acceptor claims delivery-3" "$resp" "in_review"
+
+resp=$(tool_call 2308 "reviewDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY3_ID\",\"verdict\":\"approved\"}")
+assert_contains "acceptor approves delivery-3" "$resp" "approved"
+
+DELIVER3_BLOCK_RESP=$(wait_resp 2305)
+assert_contains "deliver-3 unblocked" "$DELIVER3_BLOCK_RESP" "reviewed"
 echo ""
 
 echo "==============================="

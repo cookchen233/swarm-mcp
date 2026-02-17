@@ -7,7 +7,7 @@
 本项目采用 **issue-centric** 协作模型：
 
 - **Issue**：一个主问题（工作池容器）
-- **Task**：可被任意 worker 领取的工作单元（不分配到固定人）
+- **Task**：可被任意 worker 领取的工作单元
 - 通过 **事件流**（long-poll）进行 lead/worker 协作
 - 通过 **文件锁（租约）** 防止并发改文件冲突
 - 通过 **文档库（docs library）** 在 lead/worker 之间传递上下文
@@ -41,7 +41,7 @@ open -> in_progress -> submitted -> done
                    -> canceled
 ```
 
-与消息联动：
+ 与消息联动：
 
 - `askIssueTask(kind=question|blocker)` 或 `postIssueTaskMessage(kind=question|blocker)` 会把 task 自动置为 `blocked`
 - lead 通过 `replyIssueTaskMessage` 回复后，task 自动解除回 `in_progress`
@@ -63,8 +63,8 @@ open -> in_progress -> submitted -> done
 
 - MCP 工具调用默认是“显式参数”风格：本 server 不会为你维护“当前 issue/task 上下文”
 - 你忘了 ID 时的恢复方式：
-  - `listIssues` / `getIssue`
-  - `listIssueTasks(issue_id)` / `getIssueTask`
+  - `listIssues(status=...)` / `listOpenedIssues` / `getIssue`
+  - `listIssueTasks(issue_id, status=...)` / `listIssueOpenedTasks(issue_id)` / `getIssueTask`
 
 另外：本 server 引入了 **session_id（强约束）** 作为“窗口隔离令牌”（类似 cookie 的作用）：
 
@@ -88,7 +88,7 @@ open -> in_progress -> submitted -> done
 - 如果你不想维护全局 shared，可以只用 issue docs
 - 如果你希望把协作规范沉淀成“团队标准”，shared docs 更合适
 
-### 两阶段注入（推荐使用姿势）
+### 推荐使用姿势（两阶段注入）
 
 ```text
 Phase 1（自由分析期）
@@ -126,6 +126,11 @@ Phase 2（协作注入期）
 - issue 有超时关闭机制，根据 createIssue/getIssue 返回的过期时间，请在过期前5分钟使用 extendIssueLease 及时续约(可通过 swarmNow 获取当前时间)
 - **强约束** 调用 waitIssueTaskEvents 接收到事件后需要仔细推理分析并处理该事件
 - **强约束** 处理完事件后需要继续调用 waitIssueTaskEvents 直到所有 tasks 被完成并调用 closeIssue
+- **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 deliverDelivery。
+  - deliverDelivery 会挂起直到验收方调用 reviewDelivery 给出结论（approved / rejected）
+  - 验收方流程：waitDeliveries(status=open) -> claimDelivery -> reviewDelivery
+  - 若 verdict=rejected：你需要根据反馈组织修复与再次交付（再次调用 deliverDelivery），直到通过或你明确终止该 issue
+- 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成整个协作流程直至交付, 在取得最终成功后, 调用 closeIssue 关闭该 issue
 ```
 
 ##### Worker 提示词
@@ -139,14 +144,33 @@ Phase 2（协作注入期）
 
 [协作规则]
 - 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 领取任务：listIssueTasks -> 找到 open -> claimIssueTask
-- 当你发现没有任何 open 状态 的 issues 或 tasks 时，请务必直接调用 waitIssues 或 waitIssueTasks
+- 领取任务：listOpenedIssues -> listIssueOpenedTasks -> claimIssueTask
+- 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
 - 开工前先补齐上下文：优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
 - 若开发中因信息不足而不确定/遇到阻塞：使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
 - task 有超时关闭机制，根据 claimIssueTask/getIssueTask 返回的过期时间，请在过期前5分钟使用 extendIssueTaskLease 及时续约(可通过 swarmNow 获取当前时间)
 - **强约束** 完成任务后提交：submitIssueTask，根据返回的 next_actions 继续进行下一步
-- **强约束** 当所有 tasks 被完成后继续调用 waitIssues 或 waitIssueTasks
+- **强约束** 当所有 tasks 被完成后继续调用 waitIssues(status=open) 或 waitIssueTasks(status=open) 直至没有任何 open 状态的 issue
+```
+
+##### 验收（Acceptor）提示词
+
+```text
+你当前处于 MCP 协作模式，可以调用 swarm-mcp 提供的工具来完成验收
+如果你在 MCP host 里看不到 swarm-mcp 工具：先尝试 tools/list
+
+[角色]
+你是 验收（Acceptor）。
+
+[协作规则]
+- 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
+- 验收流程：waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
+- 收到 delivery 后：
+  - 使用 delivery.issue_id 调用 getIssueAcceptanceBundle 拉取完整信息
+  - **强约束** 你必须分析整个代码库以及已知的所有文档信息，充分推理分析后，调用 reviewDelivery 将结果反馈给 lead
+- 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成协作流程直至验收成功
+- 当验收成功后继续调用 waitDeliveries(status=open) 直至没有任何 open 状态的 issue
 ```
 
 ##### 最小流程示例（端到端）
@@ -157,10 +181,13 @@ Phase 2（协作注入期）
 
 | 工具 | 是否挂起 | 何时返回 | 默认/固定超时 | 备注 |
 | --- | --- | --- | --- | --- |
-| `waitIssueTaskEvents(issue_id)` | 是 | 仅当出现 `question/blocker` 或 `issue_task_submitted` 信号 | 固定 600s | Lead 被动事件循环；一次最多返回 1 条 signal；忽略其它事件并继续挂起 |
-| `submitIssueTask(issue_id, task_id, ...)` | 是 | 提交后，直到 lead `reviewIssueTask` 产生 `reviewed/resolved` 事件 | 固定 600s | 提交必须携带结构化 `artifacts`；用于防止 worker 提交后立即结束对话 |
-| `askIssueTask(issue_id, task_id, ...)` | 是 | lead `replyIssueTaskMessage` 回复后 | 默认 600s（可传） | 会先发出 `question/blocker` 再等待 reply |
+| `waitIssueTaskEvents(issue_id)` | 是 | 仅当出现 `question/blocker` 或 `issue_task_submitted` 信号 | 固定 3600s | Lead 被动事件循环；一次最多返回 1 条 signal；忽略其它事件并继续挂起 |
+| `deliverDelivery(issue_id, ...)` | 是 | 交付后，直到验收方 `reviewDelivery` 返回结论 | 默认 3600s（可传） | Lead 交付给验收方；必须提供结构化 `artifacts`（至少 `test_result`/`test_cases`/`changed_files`/`reviewed_refs`） |
+| `waitDeliveries(status=open, ...)` | 是 | delivery 池中出现新的 open delivery（按数量增长触发） | 默认 3600s（可传） | 验收方被动等待交付；返回 deliveries 列表（通常取第一条） |
+| `submitIssueTask(issue_id, task_id, ...)` | 是 | 提交后，直到 lead `reviewIssueTask` 产生 `reviewed/resolved` 事件 | 固定 3600s | 提交必须携带结构化 `artifacts`；用于防止 worker 提交后立即结束对话 |
+| `askIssueTask(issue_id, task_id, ...)` | 是 | lead `replyIssueTaskMessage` 回复后 | 默认 3600s（可传） | 会先发出 `question/blocker` 再等待 reply |
 | `lockFiles(...)` | 可能 | 拿到锁即返回；若被占用则等待到 `wait_sec` | `wait_sec` | 不会无限挂起，超时会失败返回 |
+| `reopenIssue(issue_id, ...)` | 否 | 调用成功立即返回 | - | 仅当 issue 已 `done/canceled` 时可调用；用于重新开启并触发再次审查 |
 
 另外：同一 issue 内的 `task_id` 为递增序列：`task-1`、`task-2`…（不会与其它 issue 冲突）。
 
@@ -169,9 +196,9 @@ Phase 2（协作注入期）
    - `createIssueTask(issue_id, subject="...", description="...", difficulty="easy|medium|focus", context_task_ids=[...], suggested_files=[...], spec={name:"spec", split_from:"...", split_reason:"...", impact_scope:"...", context_task_ids:[...], goal:"...", rules:"...", constraints:"...", conventions:"...", acceptance:"..."})`
 
 2. **Worker 领取并实现**
-   - （可选）当 lead 尚未创建 issue 时，你可以先调用 `waitIssues(after_count=0, timeout_sec=600)` 阻塞等待 issue 出现
-   - （可选）当你已知道 `issue_id` 但 lead 尚未创建 tasks 时，你可以调用 `waitIssueTasks(issue_id, after_count=0, timeout_sec=600)` 阻塞等待 task 出现
-   - `listIssueTasks(issue_id)` -> 找 `open`
+   - （可选）当 lead 尚未创建 issue 时，你可以先调用 `waitIssues(timeout_sec=3600)` 阻塞等待 issue 出现
+   - （可选）当你已知道 `issue_id` 但 lead 尚未创建 tasks 时，你可以调用 `waitIssueTasks(issue_id, timeout_sec=3600)` 阻塞等待 task 出现
+   - `listIssueOpenedTasks(issue_id)`
    - `claimIssueTask(issue_id, task_id)`（若该 task 被 lead 预留，则必须带 `next_step_token`）
    - `lockFiles(task_id, files=["path/to/file.go"], ttl_sec=120, wait_sec=60)`
    - （编码；期间 `heartbeat(lease_id)`）
@@ -180,9 +207,9 @@ Phase 2（协作注入期）
 
    Worker 侧建议把整个过程当作一个循环执行：
 
-   - `submitIssueTask` 返回后不要结束对话；它返回的结果里会包含 `next_actions`，你应继续执行其中的动作（例如 `listIssueTasks` / `claimIssueTask`）来领取下一项工作。
+   - `submitIssueTask` 返回后不要结束对话；它返回的结果里会包含 `next_actions`，你应继续执行其中的动作（例如 `listIssueOpenedTasks` / `claimIssueTask`）来领取下一项工作。
    - 重复「领取 -> 锁文件 -> 实现 -> 提交」直到：
-     - `listIssueTasks(issue_id, status="open")` 为空（没有可领取任务），或
+     - `listIssueOpenedTasks(issue_id)` 为空（没有可领取任务），或
      - lead 明确结束该 issue / 不再派发任务。
 
 3. **Lead 验收或打回**
@@ -191,7 +218,7 @@ Phase 2（协作注入期）
    - `reviewIssueTask(issue_id, task_id, verdict="approved|rejected", feedback="...", completion_score=1|2|5, artifacts={review_summary:"...", reviewed_refs:[...]}, feedback_details=[...], next_step_token="...")`
 
 4. **Q&A（严格模式推荐）**
-   - Worker：`askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=600)`
+   - Worker：`askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=3600)`
    - Lead：`replyIssueTaskMessage(issue_id, task_id, content="...")`
 
 ## 安装与运行
@@ -270,98 +297,40 @@ $SWARM_MCP_ROOT/
 
 ## 协作工作流（推荐）
 
-### Lead（主窗口）
+### 核心角色流程
 
-1. `createIssue`
-2. `createIssueTask`（拆成多个可并行的 tasks）
-3. `waitIssueTaskEvents`（select-like 阻塞等待提交/问题/阻塞）
-4. `replyIssueTaskMessage` / `reviewIssueTask`
+**Lead窗口**：
 
-### Worker（执行窗口）
+1. 创建issue（`createIssue`）
+2. 分解tasks（`createIssueTask`）
+3. 等待tasks完成（`waitIssueTasks`、`listIssueTasks`）—— wait默认返回status=open的任务
+4. 交付issue（`deliverDelivery`，阻塞至验收）
+5. 监控deliveries（`waitDeliveries`、`listOpenedDeliveries`）—— wait默认返回status=open的交付
 
-1. `listIssueTasks` → 找到 `open` 的 task
-2. `claimIssueTask`（会记录当前窗口 `member_id`）
-3. `lockFiles`（修改文件前必须加锁）
-4. 编码（持锁期间 `heartbeat`）
-5. `unlock`
-6. `submitIssueTask`
+### Worker窗口
 
-### Worker 提问（严格模式推荐路径）
+1. 等待tasks（`waitIssueTasks`）—— 返回status=open的任务，若存在则立即返回
+2. 领取task（`claimIssueTask`）—— 转为in_progress状态
+3. 提交work result（`submitIssueTask`，阻塞至lead审核）
+4. 续约（`extendIssueTaskLease`）—— 防止lease过期回退到open
 
-- 使用 `askIssueTask(kind=question|blocker, ...)`
-  - 该调用会阻塞直到 lead 使用 `replyIssueTaskMessage` 回复
+### 回收规则（做了什么）
 
-## 手动验证（推荐跑一遍）
+- issue 过期：`open|in_progress` -> `canceled`，并追加事件 `issue_expired`
+- task 过期：`in_progress|blocked|submitted` -> `open`（可重新领取），并追加事件 `issue_task_expired`
 
-> 下面以“两个 MCP client 窗口（lead/worker）”为例做手动验证；如果你的 MCP host 支持多会话/多窗口，可直接照做。
+### Wait工具语义
 
-### Step 0：配置 MCP Server
+所有`wait*`工具使用统一的**立即返回+状态过滤**语义：
 
-参考上面的 “MCP Client 配置”。建议设置：
+- **立即返回**：若存在匹配status的对象，立即返回（不等待增量）
+- **状态过滤**：`status`参数默认为`open`，可指定其他状态（in_progress/done等）
+- **阻塞等待**：若无匹配对象，则长轮询直到出现或超时
+- **超时**：`timeout_sec`默认3600秒，**最小值3600秒**（传入小于3600s的值会被自动提升到3600s）
+- **限制数量**：`limit`参数默认50，控制返回数量上限
+- **跨进程安全**：基于文件系统轮询，支持多进程协作
 
-- `SWARM_MCP_ROOT=~/.swarm-mcp/<project_key>`（按项目隔离）
-- `SWARM_MCP_STRICT=1`（默认严格模式）
-- `SWARM_MCP_SUGGESTED_MIN_TASK_COUNT=2`（建议最少任务数）
-- `SWARM_MCP_MAX_TASK_COUNT=10`（每个 issue 最大任务数；在 createIssueTask 时强制）
-- `SWARM_MCP_ISSUE_TTL_SEC=3600`（issue 续约超时时间；过期自动标记为 canceled）
-- `SWARM_MCP_TASK_TTL_SEC=600`（task 续约超时时间；过期会把 in_progress/blocked/submitted 自动回到 open 以便继续）
-
-重启 MCP host 后，每个窗口/会话都能看到 swarm-mcp 工具。
-
-### Step 1：开两个窗口
-
-- **窗口 A（Lead）**：只做拆解、答疑、验收（通常不直接改代码）
-- **窗口 B（Worker）**：领取任务、锁文件、编码、提交
-
-每个窗口都有自己的 `member_id`（用 `whoAmI` 查看），用于审计与追踪。
-
-### Step 2：Lead 创建 issue 与 tasks
-
-- `createIssue`
-- （可选）`extendIssueLease`（issue 续约，避免长时间无人操作被自动取消）
-- 多次 `createIssueTask`（必须设置 `difficulty=easy|medium|focus`）
-- 开始 `waitIssueTaskEvents` 循环等待事件
-
-### Step 3：Worker 领取任务并修改
-
-- `listIssueTasks` -> 找 `open`
-- `claimIssueTask`
-- （可选）`extendIssueTaskLease`（task 续约，避免窗口关闭/长时间无动作导致任务自动回到 open）
-- `lockFiles`（锁定本 task 相关文件）
-- 编码（期间 `heartbeat`）
-- `unlock`
-- `submitIssueTask`
-
-### Step 4：Lead 验收
-
-- `waitIssueTaskEvents` 收到 submitted
-- `getNextStepToken` 生成下一步 token（服务端自动派发并预留，`end` 或 `claim_task`）
-- `reviewIssueTask`（必须携带 `completion_score`、`feedback_details`、`artifacts` 与 `next_step_token`）
-
-### Step 5：提问/阻塞（验证 strict + ask）
-
-- worker：`askIssueTask(kind=question|blocker, ...)`（会阻塞）
-- lead：`replyIssueTaskMessage(...)`
-- 观察 task 状态：`in_progress -> blocked -> in_progress`
-
-## 关键场景验证（避免线上踩坑）
-
-### 锁冲突
-
-1. worker 先 `lockFiles` 某文件
-2. lead 或另一个 worker 立刻锁同一文件（`wait_sec=0`）应失败
-
-### 锁过期抢占
-
-1. worker `lockFiles`，设置较小 `ttl_sec`，并不做 heartbeat
-2. 等过期后其他窗口再 `lockFiles` 同一文件应成功
-3. 检查 `trace/events.jsonl` 有过期相关审计记录
-
-### 多文件原子锁
-
-1. `lockFiles(files=["a.go","b.go"])`
-2. 另一个窗口锁 `b.go` 相关集合应失败
-3. 释放后重试应成功
+> **注意**：所有阻塞接口的`timeout_sec`参数都有3600秒（1小时）的最小限制。这是为了确保协作的持续性，防止AI故意传入较短参数以提早结束会话。可通过环境变量`SWARM_MCP_DEFAULT_TIMEOUT_SEC`自定义最小值。
 
 ## 审计日志
 
@@ -393,11 +362,6 @@ grep lock "$SWARM_MCP_ROOT/trace/events.jsonl"
 - `claimIssueTask`
 - `submitIssueTask`
 - `waitIssueTaskEvents`
-
-### 回收规则（做了什么）
-
-- issue 过期：`open|in_progress` -> `canceled`，并追加事件 `issue_expired`
-- task 过期：`in_progress|blocked|submitted` -> `open`（可重新领取），并追加事件 `issue_task_expired`
 
 ### 返回字段（如何知道何时续约）
 
@@ -469,8 +433,8 @@ trash "$SWARM_MCP_ROOT"
 ## 主要工具（摘要）
 
 - Issue / Task
-  - `createIssue`, `listIssues`, `getIssue`
-  - `createIssueTask`, `listIssueTasks`, `getIssueTask`
+  - `createIssue`, `listIssues`（支持 status/subject_contains/分页/排序）, `listOpenedIssues`, `getIssue`
+  - `createIssueTask`, `listIssueTasks`（支持 status/subject_contains/claimed_by/submitter/分页/排序）, `listIssueOpenedTasks`, `getIssueTask`
   - `claimIssueTask`, `submitIssueTask`, `reviewIssueTask`
   - `waitIssueTaskEvents`
   - `askIssueTask`, `replyIssueTaskMessage`

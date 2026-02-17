@@ -49,7 +49,10 @@ const (
 // IssueEvent types
 const (
 	EventIssueCreated       = "issue_created"
+	EventIssueDelivered     = "issue_delivered"
+	EventIssueAcceptance    = "issue_acceptance"
 	EventIssueClosed        = "issue_closed"
+	EventIssueReopened      = "issue_reopened"
 	EventIssueExpired       = "issue_expired"
 	EventIssueTaskCreated   = "issue_task_created"
 	EventIssueTaskClaimed   = "issue_task_claimed"
@@ -58,6 +61,14 @@ const (
 	EventIssueTaskReviewed  = "issue_task_reviewed"
 	EventIssueTaskResolved  = "issue_task_resolved"
 	EventIssueTaskMessage   = "issue_task_message"
+)
+
+// Delivery statuses
+const (
+	DeliveryOpen     = "open"
+	DeliveryInReview = "in_review"
+	DeliveryApproved = "approved"
+	DeliveryRejected = "rejected"
 )
 
 type Worker struct {
@@ -125,6 +136,33 @@ type SubmissionArtifacts struct {
 	TestCases    []string `json:"test_cases"`
 	TestResult   string   `json:"test_result"`
 	TestOutput   string   `json:"test_output"`
+}
+
+type DeliveryArtifacts struct {
+	TestResult   string   `json:"test_result"`
+	TestCases    []string `json:"test_cases"`
+	ChangedFiles []string `json:"changed_files"`
+	ReviewedRefs []string `json:"reviewed_refs"`
+	TestOutput   string   `json:"test_output"`
+	KnownRisks   string   `json:"known_risks"`
+}
+
+type Delivery struct {
+	ID               string            `json:"id"`
+	IssueID          string            `json:"issue_id"`
+	Summary          string            `json:"summary"`
+	Refs             string            `json:"refs"`
+	Artifacts        DeliveryArtifacts `json:"artifacts"`
+	Status           string            `json:"status"`
+	DeliveredBy      string            `json:"delivered_by"`
+	ClaimedBy        string            `json:"claimed_by"`
+	ReviewedBy       string            `json:"reviewed_by"`
+	Feedback         string            `json:"feedback"`
+	DeliveredAt      string            `json:"delivered_at"`
+	ClaimedAt        string            `json:"claimed_at"`
+	ReviewedAt       string            `json:"reviewed_at"`
+	LeaseExpiresAtMs int64             `json:"lease_expires_at_ms"`
+	UpdatedAt        string            `json:"updated_at"`
 }
 
 type ReviewArtifacts struct {
@@ -205,12 +243,14 @@ type IssueTask struct {
 type IssueEvent struct {
 	Seq                 int64                `json:"seq"`
 	Type                string               `json:"type"`
+	ParentSeq           int64                `json:"parent_seq,omitempty"`
 	IssueID             string               `json:"issue_id"`
 	TaskID              string               `json:"task_id"`
 	Actor               string               `json:"actor"`
 	Kind                string               `json:"kind"`
 	Detail              string               `json:"detail"`
 	Refs                string               `json:"refs"`
+	DeliveryArtifacts   *DeliveryArtifacts   `json:"delivery_artifacts,omitempty"`
 	SubmissionArtifacts *SubmissionArtifacts `json:"submission_artifacts,omitempty"`
 	ReviewArtifacts     *ReviewArtifacts     `json:"review_artifacts,omitempty"`
 	FeedbackDetails     []FeedbackDetail     `json:"feedback_details,omitempty"`
@@ -229,8 +269,9 @@ type IssueService struct {
 	store *Store
 	trace *TraceService
 
-	issueTTLSec int
-	taskTTLSec  int
+	issueTTLSec       int
+	taskTTLSec        int
+	defaultTimeoutSec int
 
 	mu       sync.Mutex
 	cond     *sync.Cond

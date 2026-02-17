@@ -62,6 +62,13 @@ func main() {
 		}
 	}
 
+	defaultTimeoutSec := 3600
+	if v := os.Getenv("SWARM_MCP_DEFAULT_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			defaultTimeoutSec = n
+		}
+	}
+
 	srv := mcp.NewServer(mcp.ServerConfig{
 		Name:                  "swarm-mcp",
 		Version:               "0.1.0",
@@ -71,6 +78,7 @@ func main() {
 		MaxTaskCount:          maxTaskCount,
 		IssueTTLSec:           issueTTLSec,
 		TaskTTLSec:            taskTTLSec,
+		DefaultTimeoutSec:     defaultTimeoutSec,
 	}, store, trace)
 
 	if err := srv.Run(); err != nil {

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-func NewIssueService(store *Store, trace *TraceService, issueTTLSec, taskTTLSec int) *IssueService {
-	s := &IssueService{store: store, trace: trace, versions: map[string]int64{}, issueTTLSec: issueTTLSec, taskTTLSec: taskTTLSec}
+func NewIssueService(store *Store, trace *TraceService, issueTTLSec, taskTTLSec, defaultTimeoutSec int) *IssueService {
+	s := &IssueService{store: store, trace: trace, versions: map[string]int64{}, issueTTLSec: issueTTLSec, taskTTLSec: taskTTLSec, defaultTimeoutSec: defaultTimeoutSec}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -183,6 +183,28 @@ func (s *IssueService) SweepExpired() {
 				}
 			}
 		}
+
+		// Sweep expired in_review deliveries
+		deliveriesDir := s.store.Path("deliveries")
+		deliveryFiles, _ := s.store.ListJSONFiles(deliveriesDir)
+		for _, p := range deliveryFiles {
+			var d Delivery
+			if err := s.store.ReadJSON(p, &d); err != nil {
+				continue
+			}
+			if d.Status == DeliveryInReview && d.LeaseExpiresAtMs > 0 && nowMs > d.LeaseExpiresAtMs {
+				prevClaimedBy := d.ClaimedBy
+				d.Status = DeliveryOpen
+				d.ClaimedBy = ""
+				d.ClaimedAt = ""
+				d.LeaseExpiresAtMs = 0
+				d.UpdatedAt = NowStr()
+				_ = s.store.WriteJSON(p, &d)
+				// Note: deliveries don't have event log, so no event append
+				_ = prevClaimedBy // silence unused
+			}
+		}
+
 		return nil
 	})
 }

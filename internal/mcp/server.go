@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,7 @@ type ServerConfig struct {
 	MaxTaskCount          int
 	IssueTTLSec           int
 	TaskTTLSec            int
+	DefaultTimeoutSec     int
 }
 
 type Server struct {
@@ -55,7 +58,7 @@ func NewServer(cfg ServerConfig, store *swarm.Store, trace *swarm.TraceService) 
 		docsSvc:         swarm.NewDocsService(store),
 		workerSvc:       swarm.NewWorkerService(store, trace),
 		lockSvc:         swarm.NewLockService(store, trace),
-		issueSvc:        swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec),
+		issueSvc:        swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec, cfg.DefaultTimeoutSec),
 	}
 }
 
@@ -229,6 +232,163 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		}
 		return m
 	}
+
+	filterIssues := func(issues []swarm.Issue, status, subjectContains string) []swarm.Issue {
+		out := make([]swarm.Issue, 0, len(issues))
+		status = strings.TrimSpace(strings.ToLower(status))
+		if status == "" {
+			status = "all"
+		}
+		subjectContains = strings.TrimSpace(subjectContains)
+		subjectContainsLower := strings.ToLower(subjectContains)
+		for _, it := range issues {
+			if status != "all" && status != "" {
+				if it.Status != status {
+					continue
+				}
+			}
+			if subjectContainsLower != "" {
+				if !strings.Contains(strings.ToLower(it.Subject), subjectContainsLower) {
+					continue
+				}
+			}
+			out = append(out, it)
+		}
+		return out
+	}
+
+	sortIssues := func(issues []swarm.Issue, sortBy, sortOrder string) {
+		sortBy = strings.TrimSpace(strings.ToLower(sortBy))
+		if sortBy == "" {
+			sortBy = "created_at"
+		}
+		sortOrder = strings.TrimSpace(strings.ToLower(sortOrder))
+		if sortOrder == "" {
+			sortOrder = "desc"
+		}
+		less := func(i, j int) bool {
+			var a, b string
+			switch sortBy {
+			case "updated_at":
+				a, b = issues[i].UpdatedAt, issues[j].UpdatedAt
+			default:
+				a, b = issues[i].CreatedAt, issues[j].CreatedAt
+			}
+			// RFC3339 lexicographic compares correctly
+			if sortOrder == "asc" {
+				return a < b
+			}
+			return a > b
+		}
+		sort.SliceStable(issues, less)
+	}
+
+	paginateIssues := func(issues []swarm.Issue, offset, limit int) []swarm.Issue {
+		if offset < 0 {
+			offset = 0
+		}
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		if offset >= len(issues) {
+			return []swarm.Issue{}
+		}
+		end := offset + limit
+		if end > len(issues) {
+			end = len(issues)
+		}
+		return issues[offset:end]
+	}
+
+	filterTasks := func(tasks []swarm.IssueTask, status, subjectContains, claimedBy, submitter string) []swarm.IssueTask {
+		out := make([]swarm.IssueTask, 0, len(tasks))
+		status = strings.TrimSpace(strings.ToLower(status))
+		if status == "" {
+			status = "all"
+		}
+		subjectContains = strings.TrimSpace(subjectContains)
+		subjectContainsLower := strings.ToLower(subjectContains)
+		claimedBy = strings.TrimSpace(claimedBy)
+		submitter = strings.TrimSpace(submitter)
+		for _, it := range tasks {
+			if status != "all" && status != "" {
+				if it.Status != status {
+					continue
+				}
+			}
+			if subjectContainsLower != "" {
+				if !strings.Contains(strings.ToLower(it.Subject), subjectContainsLower) {
+					continue
+				}
+			}
+			if claimedBy != "" {
+				if it.ClaimedBy != claimedBy {
+					continue
+				}
+			}
+			if submitter != "" {
+				if it.Submitter != submitter {
+					continue
+				}
+			}
+			out = append(out, it)
+		}
+		return out
+	}
+
+	sortTasks := func(tasks []swarm.IssueTask, sortBy, sortOrder string) {
+		sortBy = strings.TrimSpace(strings.ToLower(sortBy))
+		if sortBy == "" {
+			sortBy = "created_at"
+		}
+		sortOrder = strings.TrimSpace(strings.ToLower(sortOrder))
+		if sortOrder == "" {
+			sortOrder = "desc"
+		}
+		less := func(i, j int) bool {
+			switch sortBy {
+			case "updated_at":
+				if sortOrder == "asc" {
+					return tasks[i].UpdatedAt < tasks[j].UpdatedAt
+				}
+				return tasks[i].UpdatedAt > tasks[j].UpdatedAt
+			case "points":
+				if sortOrder == "asc" {
+					return tasks[i].Points < tasks[j].Points
+				}
+				return tasks[i].Points > tasks[j].Points
+			default:
+				if sortOrder == "asc" {
+					return tasks[i].CreatedAt < tasks[j].CreatedAt
+				}
+				return tasks[i].CreatedAt > tasks[j].CreatedAt
+			}
+		}
+		sort.SliceStable(tasks, less)
+	}
+
+	paginateTasks := func(tasks []swarm.IssueTask, offset, limit int) []swarm.IssueTask {
+		if offset < 0 {
+			offset = 0
+		}
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		if offset >= len(tasks) {
+			return []swarm.IssueTask{}
+		}
+		end := offset + limit
+		if end > len(tasks) {
+			end = len(tasks)
+		}
+		return tasks[offset:end]
+	}
 	switch name {
 	case "whoAmI":
 		return map[string]any{"member_id": memberID}, nil
@@ -244,6 +404,29 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		issues = filterIssues(issues, str(args, "status"), str(args, "subject_contains"))
+		sortIssues(issues, str(args, "sort_by"), str(args, "sort_order"))
+		issues = paginateIssues(issues, intVal(args, "offset"), intVal(args, "limit"))
+		out := make([]map[string]any, 0, len(issues))
+		for _, it := range issues {
+			m := map[string]any{
+				"id":                  it.ID,
+				"subject":             it.Subject,
+				"status":              it.Status,
+				"lease_expires_at_ms": it.LeaseExpiresAtMs,
+				"created_at":          it.CreatedAt,
+				"updated_at":          it.UpdatedAt,
+			}
+			out = append(out, addLeaseExpiresAt(m))
+		}
+		return out, nil
+	case "listOpenedIssues":
+		issues, err := s.issueSvc.ListIssues()
+		if err != nil {
+			return nil, err
+		}
+		issues = filterIssues(issues, swarm.IssueOpen, "")
+		sortIssues(issues, "created_at", "desc")
 		out := make([]map[string]any, 0, len(issues))
 		for _, it := range issues {
 			m := map[string]any{
@@ -258,7 +441,11 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		}
 		return out, nil
 	case "waitIssues":
-		issues, count, err := s.issueSvc.WaitIssues(intVal(args, "after_count"), intVal(args, "timeout_sec"))
+		status := str(args, "status")
+		if strings.TrimSpace(status) == "" {
+			status = swarm.IssueOpen
+		}
+		issues, err := s.issueSvc.WaitIssues(status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
 		if err != nil {
 			return nil, err
 		}
@@ -270,9 +457,13 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 			}
 			out = append(out, addLeaseExpiresAt(addNow(m)))
 		}
-		return map[string]any{"issues": out, "count": count, "server_now_ms": nowMs, "server_now": nowStr}, nil
+		return map[string]any{"issues": out, "count": len(issues), "server_now_ms": nowMs, "server_now": nowStr}, nil
 	case "waitIssueTasks":
-		tasks, count, err := s.issueSvc.WaitIssueTasks(str(args, "issue_id"), intVal(args, "after_count"), intVal(args, "timeout_sec"))
+		status := str(args, "status")
+		if strings.TrimSpace(status) == "" {
+			status = swarm.IssueTaskOpen
+		}
+		tasks, err := s.issueSvc.WaitIssueTasks(str(args, "issue_id"), status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
 		if err != nil {
 			return nil, err
 		}
@@ -284,7 +475,7 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 			}
 			out = append(out, addLeaseExpiresAt(addNow(m)))
 		}
-		return map[string]any{"tasks": out, "count": count, "server_now_ms": nowMs, "server_now": nowStr}, nil
+		return map[string]any{"tasks": out, "count": len(tasks), "server_now_ms": nowMs, "server_now": nowStr}, nil
 	case "getIssue":
 		issue, err := s.issueSvc.GetIssue(str(args, "issue_id"))
 		if err != nil {
@@ -325,6 +516,194 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 			return nil, err
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
+	case "reopenIssue":
+		issue, err := s.issueSvc.ReopenIssue(memberID, str(args, "issue_id"), str(args, "summary"))
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(issue)
+		if err != nil {
+			return nil, err
+		}
+		return addLeaseExpiresAt(addNow(m)), nil
+	case "deliverDelivery":
+		art := objMap(args, "artifacts")
+		out, err := s.issueSvc.DeliverAndWaitReview(
+			memberID,
+			str(args, "issue_id"),
+			str(args, "summary"),
+			str(args, "refs"),
+			swarm.DeliveryArtifacts{
+				TestResult:   str(art, "test_result"),
+				TestCases:    strSlice(art, "test_cases"),
+				ChangedFiles: strSlice(art, "changed_files"),
+				ReviewedRefs: strSlice(art, "reviewed_refs"),
+				TestOutput:   str(art, "test_output"),
+				KnownRisks:   str(art, "known_risks"),
+			},
+			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return addNow(out), nil
+	case "claimDelivery":
+		d, err := s.issueSvc.ClaimDelivery(memberID, str(args, "delivery_id"), intVal(args, "extend_sec"))
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(d)
+		if err != nil {
+			return nil, err
+		}
+		return addLeaseExpiresAt(addNow(m)), nil
+	case "extendDeliveryLease":
+		d, err := s.issueSvc.ExtendDeliveryLease(memberID, str(args, "delivery_id"), intVal(args, "extend_sec"))
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(d)
+		if err != nil {
+			return nil, err
+		}
+		return addLeaseExpiresAt(addNow(m)), nil
+	case "reviewDelivery":
+		d, err := s.issueSvc.ReviewDelivery(memberID, str(args, "delivery_id"), str(args, "verdict"), str(args, "feedback"), str(args, "refs"))
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(d)
+		if err != nil {
+			return nil, err
+		}
+		return addNow(m), nil
+	case "getDelivery":
+		d, err := s.issueSvc.GetDelivery(str(args, "delivery_id"))
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(d)
+		if err != nil {
+			return nil, err
+		}
+		return addNow(m), nil
+	case "listDeliveries":
+		ds, err := s.issueSvc.ListDeliveries(
+			str(args, "status"),
+			str(args, "issue_id"),
+			str(args, "delivered_by"),
+			str(args, "reviewed_by"),
+		)
+		if err != nil {
+			return nil, err
+		}
+		offset := intVal(args, "offset")
+		limit := intVal(args, "limit")
+		if offset < 0 {
+			offset = 0
+		}
+		if limit <= 0 {
+			limit = 50
+		}
+		if limit > 200 {
+			limit = 200
+		}
+		if offset > len(ds) {
+			offset = len(ds)
+		}
+		end := offset + limit
+		if end > len(ds) {
+			end = len(ds)
+		}
+		ds = ds[offset:end]
+		out := make([]map[string]any, 0, len(ds))
+		for _, it := range ds {
+			m, err := toMap(it)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, addNow(m))
+		}
+		return out, nil
+	case "listOpenedDeliveries":
+		ds, err := s.issueSvc.ListDeliveries(swarm.DeliveryOpen, "", "", "")
+		if err != nil {
+			return nil, err
+		}
+		out := make([]map[string]any, 0, len(ds))
+		for _, it := range ds {
+			m, err := toMap(it)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, addNow(m))
+		}
+		return out, nil
+	case "waitDeliveries":
+		status := str(args, "status")
+		if strings.TrimSpace(status) == "" {
+			status = swarm.DeliveryOpen
+		}
+		ds, err := s.issueSvc.WaitDeliveries(status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
+		if err != nil {
+			return nil, err
+		}
+		out := make([]map[string]any, 0, len(ds))
+		for _, it := range ds {
+			m, err := toMap(it)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, addLeaseExpiresAt(addNow(m)))
+		}
+		return map[string]any{"deliveries": out, "count": len(ds), "server_now_ms": nowMs, "server_now": nowStr}, nil
+	case "getIssueAcceptanceBundle":
+		issueID := str(args, "issue_id")
+		issue, err := s.issueSvc.GetIssue(issueID)
+		if err != nil {
+			return nil, err
+		}
+		tasks, err := s.issueSvc.ListTasks(issueID, "")
+		if err != nil {
+			return nil, err
+		}
+		issueDocs := map[string]string{}
+		for _, d := range issue.Docs {
+			c, err := s.docsSvc.ReadIssueDoc(issueID, d.Name)
+			if err != nil {
+				return nil, err
+			}
+			issueDocs[d.Name] = c
+		}
+		taskDocs := map[string]map[string]string{}
+		for _, t := range tasks {
+			m := map[string]string{}
+			for _, d := range t.TaskDocs {
+				c, err := s.docsSvc.ReadTaskDoc(issueID, t.ID, d.Name)
+				if err != nil {
+					return nil, err
+				}
+				m[d.Name] = c
+			}
+			taskDocs[t.ID] = m
+		}
+		events, err := s.issueSvc.ReadAllEvents(issueID)
+		if err != nil {
+			return nil, err
+		}
+		issueMap, err := toMap(issue)
+		if err != nil {
+			return nil, err
+		}
+		issueMap = addLeaseExpiresAt(addNow(issueMap))
+		bundle := map[string]any{
+			"issue":      issueMap,
+			"tasks":      tasks,
+			"issue_docs": issueDocs,
+			"task_docs":  taskDocs,
+			"events":     events,
+		}
+		return bundle, nil
 
 	// === Issue / Task (issue-centric default) ===
 	case "createIssue":
@@ -515,10 +894,40 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "listIssueTasks":
-		tasks, err := s.issueSvc.ListTasks(str(args, "issue_id"), str(args, "status"))
+		issueID := str(args, "issue_id")
+		tasks, err := s.issueSvc.ListTasks(issueID, "")
 		if err != nil {
 			return nil, err
 		}
+		tasks = filterTasks(tasks, str(args, "status"), str(args, "subject_contains"), str(args, "claimed_by"), str(args, "submitter"))
+		sortTasks(tasks, str(args, "sort_by"), str(args, "sort_order"))
+		tasks = paginateTasks(tasks, intVal(args, "offset"), intVal(args, "limit"))
+		out := make([]map[string]any, 0, len(tasks))
+		for _, it := range tasks {
+			m := map[string]any{
+				"id":                  it.ID,
+				"issue_id":            it.IssueID,
+				"subject":             it.Subject,
+				"difficulty":          it.Difficulty,
+				"points":              it.Points,
+				"status":              it.Status,
+				"reserved_token":      it.ReservedToken,
+				"reserved_until_ms":   it.ReservedUntilMs,
+				"lease_expires_at_ms": it.LeaseExpiresAtMs,
+				"claimed_by":          it.ClaimedBy,
+				"created_at":          it.CreatedAt,
+				"updated_at":          it.UpdatedAt,
+			}
+			out = append(out, addLeaseExpiresAt(m))
+		}
+		return out, nil
+	case "listIssueOpenedTasks":
+		issueID := str(args, "issue_id")
+		tasks, err := s.issueSvc.ListTasks(issueID, swarm.IssueTaskOpen)
+		if err != nil {
+			return nil, err
+		}
+		sortTasks(tasks, "created_at", "desc")
 		out := make([]map[string]any, 0, len(tasks))
 		for _, it := range tasks {
 			m := map[string]any{
@@ -542,7 +951,7 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		// Lead passive mode: only issue_id is honored.
 		// Cursor auto-resumes per (issue_id, member_id).
 		after := int64(-1)
-		timeoutSec := 600
+		timeoutSec := s.cfg.DefaultTimeoutSec
 		limit := 50
 		events, nextSeq, err := s.issueSvc.WaitIssueTaskEvents(
 			str(args, "issue_id"),
@@ -566,7 +975,7 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 			str(args, "kind"),
 			str(args, "content"),
 			str(args, "refs"),
-			intVal(args, "timeout_sec"),
+			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
 		)
 	case "postIssueTaskMessage":
 		return s.issueSvc.PostTaskMessage(
@@ -699,6 +1108,17 @@ func int64Val(args map[string]any, key string) int64 {
 	default:
 		return 0
 	}
+}
+
+// timeoutWithMin enforces a minimum timeout of 3600s (1 hour)
+func timeoutWithMin(timeoutSec int, minTimeoutSec int) int {
+	if timeoutSec <= 0 {
+		return minTimeoutSec
+	}
+	if timeoutSec < minTimeoutSec {
+		return minTimeoutSec
+	}
+	return timeoutSec
 }
 
 func objMap(args map[string]any, key string) map[string]any {

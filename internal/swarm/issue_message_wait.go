@@ -76,13 +76,13 @@ func (s *IssueService) ReplyTaskMessage(issueID, taskID, actor, content, refs st
 }
 
 // WaitTaskEvents blocks until there are new events for a specific task after the given seq.
-// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 600.
+// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 3600.
 func (s *IssueService) WaitTaskEvents(issueID, taskID string, afterSeq int64, timeoutSec, limit int) ([]IssueEvent, int64, error) {
 	if issueID == "" || taskID == "" {
 		return nil, afterSeq, fmt.Errorf("issue_id and task_id are required")
 	}
 	if timeoutSec <= 0 {
-		timeoutSec = 600
+		timeoutSec = s.defaultTimeoutSec
 	}
 	if limit <= 0 {
 		limit = 20
@@ -123,7 +123,7 @@ func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs 
 		return nil, fmt.Errorf("kind must be question or blocker")
 	}
 	if timeoutSec <= 0 {
-		timeoutSec = 600
+		timeoutSec = s.defaultTimeoutSec
 	}
 
 	q, err := s.PostTaskMessage(issueID, taskID, actor, kind, content, refs)
@@ -174,7 +174,7 @@ func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs 
 // - If afterSeq >= 0: use it as the explicit cursor.
 // - If afterSeq < 0: auto-resume from a persisted per-(issue,actor) cursor. If missing, tail to the current end.
 //
-// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 600.
+// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 3600.
 func (s *IssueService) WaitIssueTaskEvents(issueID, actor string, afterSeq int64, timeoutSec, limit int) ([]IssueEvent, int64, error) {
 	if issueID == "" {
 		return nil, afterSeq, fmt.Errorf("issue_id is required")
@@ -184,7 +184,7 @@ func (s *IssueService) WaitIssueTaskEvents(issueID, actor string, afterSeq int64
 		actor = "lead"
 	}
 	if timeoutSec <= 0 {
-		timeoutSec = 600
+		timeoutSec = s.defaultTimeoutSec
 	}
 	if limit <= 0 {
 		limit = 20
