@@ -191,7 +191,10 @@ func (s *IssueService) ClaimDelivery(actor, deliveryID string, extendSec int) (*
 			ttlSec = s.issueTTLSec
 		}
 		if ttlSec <= 0 {
-			ttlSec = 3600
+			ttlSec = s.defaultTimeoutSec
+		}
+		if ttlSec < s.defaultTimeoutSec {
+			ttlSec = s.defaultTimeoutSec
 		}
 		d.LeaseExpiresAtMs = time.Now().UnixMilli() + int64(ttlSec)*1000
 		d.UpdatedAt = NowStr()
@@ -234,7 +237,10 @@ func (s *IssueService) ExtendDeliveryLease(actor, deliveryID string, extendSec i
 			ttlSec = s.issueTTLSec
 		}
 		if ttlSec <= 0 {
-			ttlSec = 3600
+			ttlSec = s.defaultTimeoutSec
+		}
+		if ttlSec < s.defaultTimeoutSec {
+			ttlSec = s.defaultTimeoutSec
 		}
 		d.LeaseExpiresAtMs = time.Now().UnixMilli() + int64(ttlSec)*1000
 		d.UpdatedAt = NowStr()
@@ -312,9 +318,7 @@ func (s *IssueService) WaitDeliveries(status string, timeoutSec, limit int) ([]D
 	if strings.TrimSpace(status) == "" {
 		status = DeliveryOpen
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 50
 	}
@@ -349,9 +353,7 @@ func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (
 	if deliveryID == "" {
 		return nil, fmt.Errorf("delivery_id is required")
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 
 	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
 	poll := 200 * time.Millisecond
@@ -377,9 +379,7 @@ func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (
 }
 
 func (s *IssueService) DeliverAndWaitReview(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, timeoutSec int) (map[string]any, error) {
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	d, err := s.CreateDelivery(actor, issueID, summary, refs, artifacts)
 	if err != nil {
 		return nil, err

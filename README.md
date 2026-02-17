@@ -111,7 +111,7 @@ Phase 2（协作注入期）
 
 然后进入协作阶段：我这里有一个叫 swarm-mcp 的协作 MCP Server
 你需要：
-1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序）以适配多人协作
+1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序），拆分的任务尽可能避免并行开发冲突以适配多人协作
 2) 然后用 swarm-mcp 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
 
 [角色]
@@ -124,8 +124,7 @@ Phase 2（协作注入期）
 - 未经明确要求：你必须只做 lead（拆分/答疑/验收/事件循环），不要自己下场实现需求、不要去改 worker 的目标代码文件
 - Q&A：worker 用 askIssueTask；你必须用同一个 issue_id/task_id 通过 replyIssueTaskMessage 回复
 - issue 有超时关闭机制，根据 createIssue/getIssue 返回的过期时间，请在过期前5分钟使用 extendIssueLease 及时续约(可通过 swarmNow 获取当前时间)
-- **强约束** 调用 waitIssueTaskEvents 接收到事件后需要仔细推理分析并处理该事件
-- **强约束** 处理完事件后需要继续调用 waitIssueTaskEvents 直到所有 tasks 被完成并调用 closeIssue
+- **强约束** 调用 waitIssueTaskEvents 接收到事件后需要仔细推理分析并处理该事件，处理完后需要继续不断调用 waitIssueTaskEvents
 - **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 deliverDelivery。
   - deliverDelivery 会挂起直到验收方调用 reviewDelivery 给出结论（approved / rejected）
   - 验收方流程：waitDeliveries(status=open) -> claimDelivery -> reviewDelivery
@@ -144,9 +143,9 @@ Phase 2（协作注入期）
 
 [协作规则]
 - 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 领取任务：listOpenedIssues -> listIssueOpenedTasks -> claimIssueTask
+- 领取任务：waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
-- 开工前先补齐上下文：优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
+- 开工前先补齐上下文：尽可能获得 Issue 相关信息，优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
 - 若开发中因信息不足而不确定/遇到阻塞：使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
 - task 有超时关闭机制，根据 claimIssueTask/getIssueTask 返回的过期时间，请在过期前5分钟使用 extendIssueTaskLease 及时续约(可通过 swarmNow 获取当前时间)
@@ -331,6 +330,7 @@ $SWARM_MCP_ROOT/
 - **跨进程安全**：基于文件系统轮询，支持多进程协作
 
 > **注意**：所有阻塞接口的`timeout_sec`参数都有3600秒（1小时）的最小限制。这是为了确保协作的持续性，防止AI故意传入较短参数以提早结束会话。可通过环境变量`SWARM_MCP_DEFAULT_TIMEOUT_SEC`自定义最小值。
+> **韧性机制**：对会在服务端阻塞等待的流程（例如 `submitIssueTask`/`askIssueTask`/`claimDelivery`），服务端会在进入阻塞前（或状态切换时）确保对应对象的 lease 覆盖至少 `SWARM_MCP_DEFAULT_TIMEOUT_SEC`，避免阻塞等待期间对象因 lease 过期被回收/回滚导致会话挂起或协作中断。
 
 ## 审计日志
 

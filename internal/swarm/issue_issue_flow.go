@@ -264,9 +264,7 @@ func (s *IssueService) DeliverIssue(actor, issueID, summary, refs string, artifa
 }
 
 func (s *IssueService) DeliverIssueAndWaitAcceptance(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, timeoutSec int) (map[string]any, error) {
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	ev, err := s.DeliverIssue(actor, issueID, summary, refs, artifacts)
 	if err != nil {
 		return nil, err
@@ -312,9 +310,7 @@ func (s *IssueService) WaitIssueAcceptanceEvents(issueID, actor string, parentSe
 		return nil, afterSeq, fmt.Errorf("parent_seq is required")
 	}
 	s.SweepExpired()
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 20
 	}
@@ -371,9 +367,7 @@ func (s *IssueService) ReviewIssueDelivery(actor, issueID string, parentSeq int6
 	if actor == "" {
 		actor = "acceptor"
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 
 	var acc *IssueEvent
 	err := s.store.WithLock(func() error {
@@ -450,9 +444,7 @@ func (s *IssueService) WaitIssueDeliveryEvents(issueID, actor string, afterSeq i
 	if actor == "" {
 		actor = "acceptor"
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 20
 	}
@@ -564,9 +556,7 @@ func (s *IssueService) WaitIssues(status string, timeoutSec, limit int) ([]Issue
 	if strings.TrimSpace(status) == "" {
 		status = IssueOpen
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 50
 	}

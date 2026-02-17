@@ -314,6 +314,11 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 		task.Submitter = actor
 		task.SubmissionArtifacts = artifacts
 		task.Status = IssueTaskSubmitted
+		nowMs := time.Now().UnixMilli()
+		minLeaseMs := nowMs + int64(s.defaultTimeoutSec)*1000
+		if task.LeaseExpiresAtMs < minLeaseMs {
+			task.LeaseExpiresAtMs = minLeaseMs
+		}
 		task.UpdatedAt = NowStr()
 		if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
 			return err
@@ -529,9 +534,7 @@ func (s *IssueService) WaitIssueTasks(issueID, status string, timeoutSec, limit 
 	if strings.TrimSpace(status) == "" {
 		status = IssueTaskOpen
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 50
 	}

@@ -62,6 +62,16 @@ func (s *IssueService) calcLeaseExpiryMs(extendSec int, defaultSec int) int64 {
 	return time.Now().UnixMilli() + int64(sec)*1000
 }
 
+func (s *IssueService) normalizeTimeoutSec(timeoutSec int) int {
+	if timeoutSec <= 0 {
+		return s.defaultTimeoutSec
+	}
+	if timeoutSec < s.defaultTimeoutSec {
+		return s.defaultTimeoutSec
+	}
+	return timeoutSec
+}
+
 func (s *IssueService) ExtendIssueLease(actor, issueID string, extendSec int) (*Issue, error) {
 	if issueID == "" {
 		return nil, fmt.Errorf("issue_id is required")

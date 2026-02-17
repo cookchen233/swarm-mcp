@@ -68,6 +68,9 @@ func main() {
 			defaultTimeoutSec = n
 		}
 	}
+	if defaultTimeoutSec < 3600 {
+		defaultTimeoutSec = 3600
+	}
 
 	srv := mcp.NewServer(mcp.ServerConfig{
 		Name:                  "swarm-mcp",

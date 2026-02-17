@@ -189,6 +189,7 @@ Some tools are intentionally blocking (hanging) to support passive event loops a
 | `reopenIssue(issue_id, ...)` | No | Returns immediately on success | - | Only allowed when the issue is `done/canceled`; reopens the issue for another review cycle |
 
 > **Important**: All blocking interfaces have a minimum timeout of 3600 seconds (1 hour). Values smaller than 3600s will be automatically enforced to the minimum. This prevents AI from intentionally passing short parameters to end sessions early, ensuring collaboration continuity. Customize via `SWARM_MCP_DEFAULT_TIMEOUT_SEC` environment variable.
+> **Resilience mechanism**: for server-side blocking flows (e.g. `submitIssueTask` / `askIssueTask` / `claimDelivery`), the server ensures the corresponding object lease covers at least `SWARM_MCP_DEFAULT_TIMEOUT_SEC` before (or during) blocking. This avoids the object being auto-expired / rolled back during the blocking wait, which would otherwise hang or disrupt the collaboration.
 
 Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no conflicts across issues).
 

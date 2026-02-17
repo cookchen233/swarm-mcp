@@ -81,9 +81,7 @@ func (s *IssueService) WaitTaskEvents(issueID, taskID string, afterSeq int64, ti
 	if issueID == "" || taskID == "" {
 		return nil, afterSeq, fmt.Errorf("issue_id and task_id are required")
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 20
 	}
@@ -122,14 +120,32 @@ func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs 
 	if kind != "question" && kind != "blocker" {
 		return nil, fmt.Errorf("kind must be question or blocker")
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 
 	q, err := s.PostTaskMessage(issueID, taskID, actor, kind, content, refs)
 	if err != nil {
 		return nil, err
 	}
+
+	// Ensure the task lease covers the blocking wait period.
+	// This prevents the task from being auto-reopened (expired) while the worker is waiting for a reply.
+	_ = s.store.WithLock(func() error {
+		task, err := s.loadTaskLocked(issueID, taskID)
+		if err != nil {
+			return nil
+		}
+		// Only extend lease for the current claimant.
+		if actor != "" && task.ClaimedBy == actor {
+			nowMs := time.Now().UnixMilli()
+			minLeaseMs := nowMs + int64(s.defaultTimeoutSec)*1000
+			if task.LeaseExpiresAtMs < minLeaseMs {
+				task.LeaseExpiresAtMs = minLeaseMs
+				task.UpdatedAt = NowStr()
+				_ = s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task)
+			}
+		}
+		return nil
+	})
 
 	// Wait for a reply after the question seq.
 	after := q.Seq
@@ -183,9 +199,7 @@ func (s *IssueService) WaitIssueTaskEvents(issueID, actor string, afterSeq int64
 	if actor == "" {
 		actor = "lead"
 	}
-	if timeoutSec <= 0 {
-		timeoutSec = s.defaultTimeoutSec
-	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	if limit <= 0 {
 		limit = 20
 	}
