@@ -363,7 +363,7 @@ func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (
 		if err != nil {
 			return nil, err
 		}
-		if d.Status != DeliveryOpen {
+		if d.Status == DeliveryApproved || d.Status == DeliveryRejected {
 			return d, nil
 		}
 		remaining := time.Until(deadline)
@@ -378,7 +378,7 @@ func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (
 	}
 }
 
-func (s *IssueService) DeliverAndWaitReview(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, timeoutSec int) (map[string]any, error) {
+func (s *IssueService) SubmitDelivery(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, timeoutSec int) (map[string]any, error) {
 	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 	d, err := s.CreateDelivery(actor, issueID, summary, refs, artifacts)
 	if err != nil {

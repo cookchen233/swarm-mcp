@@ -2,12 +2,15 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,7 +22,7 @@ type ServerConfig struct {
 	Name                  string
 	Version               string
 	Logger                *log.Logger
-	Strict                bool
+	Role                  string
 	SuggestedMinTaskCount int
 	MaxTaskCount          int
 	IssueTTLSec           int
@@ -33,8 +36,6 @@ type Server struct {
 	out io.Writer
 
 	encMu sync.Mutex
-
-	defaultMemberID string
 
 	sessMu   sync.Mutex
 	sessions map[string]string // session_id -> member_id
@@ -50,15 +51,14 @@ func NewServer(cfg ServerConfig, store *swarm.Store, trace *swarm.TraceService) 
 		cfg.Logger = log.New(os.Stderr, "swarm-mcp: ", log.LstdFlags|log.LUTC)
 	}
 	return &Server{
-		cfg:             cfg,
-		in:              os.Stdin,
-		out:             os.Stdout,
-		defaultMemberID: swarm.GenID("m"),
-		sessions:        map[string]string{},
-		docsSvc:         swarm.NewDocsService(store),
-		workerSvc:       swarm.NewWorkerService(store, trace),
-		lockSvc:         swarm.NewLockService(store, trace),
-		issueSvc:        swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec, cfg.DefaultTimeoutSec),
+		cfg:       cfg,
+		in:        os.Stdin,
+		out:       os.Stdout,
+		sessions:  map[string]string{},
+		docsSvc:   swarm.NewDocsService(store),
+		workerSvc: swarm.NewWorkerService(store, trace),
+		lockSvc:   swarm.NewLockService(store, trace),
+		issueSvc:  swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec, cfg.DefaultTimeoutSec),
 	}
 }
 
@@ -102,32 +102,159 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) memberIDForArgs(toolName string, args map[string]any) (string, error) {
-	// Strong constraint: all tools MUST carry a valid session_id, except openSession.
-	if toolName == "openSession" {
-		return s.defaultMemberID, nil
-	}
+	// Strong constraint: all tools MUST carry a valid session_id.
 	if args == nil {
-		return "", fmt.Errorf("session_id is required")
+		return "", fmt.Errorf("semantic_session_id or session_id is required")
 	}
-	sessionID, _ := args["session_id"].(string)
-	if sessionID == "" {
-		return "", fmt.Errorf("session_id is required")
+	// Prefer semantic_session_id (newer naming), fall back to session_id (legacy naming).
+	semanticSessionID, _ := args["semantic_session_id"].(string)
+	if strings.TrimSpace(semanticSessionID) == "" {
+		semanticSessionID, _ = args["session_id"].(string)
+	}
+	semanticSessionID = strings.TrimSpace(semanticSessionID)
+	if semanticSessionID == "" {
+		return "", fmt.Errorf("semantic_session_id or session_id is required")
+	}
+	valid, err := validateSemanticSessionViaGateway(semanticSessionID)
+	if err != nil {
+		return "", err
+	}
+	if !valid {
+		baseURL, tool := sessionMcpGatewayConfig()
+		return "", fmt.Errorf(
+			"invalid semantic session: please call session-mcp.upsertSemanticSession (semantic_session_id=%s gateway_url=%s validate_tool=%s)",
+			semanticSessionID,
+			baseURL,
+			tool,
+		)
 	}
 	s.sessMu.Lock()
 	defer s.sessMu.Unlock()
-	if mid, ok := s.sessions[sessionID]; ok {
+	if mid, ok := s.sessions[semanticSessionID]; ok {
 		return mid, nil
 	}
-	return "", fmt.Errorf("unknown session_id")
+	mid := swarm.GenID("m")
+	s.sessions[semanticSessionID] = mid
+	return mid, nil
 }
 
-func (s *Server) openSession() (sessionID, memberID string) {
-	sessionID = swarm.GenID("sess")
-	memberID = swarm.GenID("m")
-	s.sessMu.Lock()
-	s.sessions[sessionID] = memberID
-	s.sessMu.Unlock()
-	return sessionID, memberID
+func sessionMcpGatewayConfig() (baseURL string, validateTool string) {
+	baseURL = strings.TrimSpace(os.Getenv("SESSION_MCP_GATEWAY_URL"))
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:15410"
+	}
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	validateTool = strings.TrimSpace(os.Getenv("SESSION_MCP_VALIDATE_TOOL"))
+	if validateTool == "" {
+		validateTool = "validateSemanticSession"
+	}
+	return baseURL, validateTool
+}
+
+func validateSemanticSessionViaGateway(semanticSessionID string) (bool, error) {
+	baseURL, tool := sessionMcpGatewayConfig()
+
+	// NOTE: we use gateway direct RPC: /mcps/session-mcp
+	// This assumes session-mcp can validate semantic sessions without relying on in-memory only state.
+	url := baseURL + "/mcps/session-mcp"
+
+	// Use unique id per call for debug correlation.
+	id := time.Now().UnixNano()
+	req := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": tool,
+			"arguments": map[string]any{
+				"semantic_session_id": semanticSessionID,
+			},
+		},
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return false, err
+	}
+
+	hreq, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	if err != nil {
+		return false, err
+	}
+	hreq.Header.Set("Content-Type", "application/json")
+
+	// If gateway auth is enabled, forward the same token.
+	// Prefer MCP_GATEWAY_TOKEN for consistency with gateway itself.
+	authorization := strings.TrimSpace(os.Getenv("SESSION_MCP_GATEWAY_AUTHORIZATION"))
+	if authorization != "" {
+		hreq.Header.Set("Authorization", authorization)
+	} else {
+		token := strings.TrimSpace(os.Getenv("MCP_GATEWAY_TOKEN"))
+		if token == "" {
+			token = strings.TrimSpace(os.Getenv("SESSION_MCP_GATEWAY_TOKEN"))
+		}
+		if token != "" {
+			hreq.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+
+	apiKey := strings.TrimSpace(os.Getenv("SESSION_MCP_GATEWAY_API_KEY"))
+	if apiKey == "" {
+		apiKey = strings.TrimSpace(os.Getenv("MCP_GATEWAY_TOKEN"))
+	}
+	if apiKey != "" {
+		hreq.Header.Set("X-API-Key", apiKey)
+	}
+
+	timeoutSec := 5
+	if v := strings.TrimSpace(os.Getenv("SESSION_MCP_GATEWAY_TIMEOUT_SEC")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			timeoutSec = n
+		}
+	}
+	client := &http.Client{Timeout: time.Duration(timeoutSec) * time.Second}
+	resp, err := client.Do(hreq)
+	if err != nil {
+		return false, fmt.Errorf("session-mcp validation failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false, fmt.Errorf("session-mcp validation failed: read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("session-mcp validation failed: http %d: %s", resp.StatusCode, string(bytes.TrimSpace(body)))
+	}
+
+	// Parse MCP JSON-RPC response.
+	var rpcResp struct {
+		Result map[string]any `json:"result"`
+		Error  any            `json:"error"`
+	}
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		return false, fmt.Errorf("session-mcp validation failed: invalid rpc response: %w", err)
+	}
+	if rpcResp.Error != nil {
+		return false, fmt.Errorf("session-mcp validation failed: %v", rpcResp.Error)
+	}
+	content, _ := rpcResp.Result["content"].([]any)
+	if len(content) == 0 {
+		return false, fmt.Errorf("session-mcp validation failed: empty content")
+	}
+	first, _ := content[0].(map[string]any)
+	text, _ := first["text"].(string)
+	if strings.TrimSpace(text) == "" {
+		return false, fmt.Errorf("session-mcp validation failed: empty text")
+	}
+
+	// session-mcp wraps tool result as textified JSON.
+	var toolRes struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.Unmarshal([]byte(text), &toolRes); err != nil {
+		return false, fmt.Errorf("session-mcp validation failed: invalid tool result: %w", err)
+	}
+	return toolRes.Valid, nil
 }
 
 func (s *Server) handle(req JSONRPCRequest) *JSONRPCResponse {
@@ -146,13 +273,13 @@ func (s *Server) handle(req JSONRPCRequest) *JSONRPCResponse {
 		resp := NewResultResponse(req.ID, map[string]any{"resources": []any{}})
 		return &resp
 	case "tools/list":
-		resp := NewResultResponse(req.ID, map[string]any{"tools": allToolsStrict(s.cfg.Strict)})
+		resp := NewResultResponse(req.ID, map[string]any{"tools": allToolsForRole(s.cfg.Role)})
 		return &resp
 	case "tools/call":
 		resp := s.handleToolsCall(req.ID, req.Params)
 		return &resp
 	default:
-		resp := NewErrorResponse(req.ID, ErrMethodNotFound, "method not found", nil)
+		resp := NewErrorResponse(req.ID, ErrMethodNotFound, "method not found", req.Method)
 		return &resp
 	}
 }
@@ -198,8 +325,15 @@ func (s *Server) handleToolsCall(id any, params any) JSONRPCResponse {
 	})
 }
 
-func (s *Server) dispatch(name string, args map[string]any) (any, error) {
-	memberID, err := s.memberIDForArgs(name, args)
+func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
+	if tool == "" {
+		return nil, fmt.Errorf("tool name is required")
+	}
+	if !toolAllowedForRole(s.cfg.Role, tool) {
+		return nil, fmt.Errorf("tool '%s' is not allowed for role '%s'", tool, strings.TrimSpace(s.cfg.Role))
+	}
+
+	memberID, err := s.memberIDForArgs(tool, args)
 	if err != nil {
 		return nil, err
 	}
@@ -389,14 +523,11 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		}
 		return tasks[offset:end]
 	}
-	switch name {
-	case "whoAmI":
+	switch tool {
+	case "myProfile":
 		return map[string]any{"member_id": memberID}, nil
 	case "swarmNow":
 		return map[string]any{"now_ms": nowMs, "now": nowStr}, nil
-	case "openSession":
-		sid, mid := s.openSession()
-		return map[string]any{"session_id": sid, "member_id": mid}, nil
 
 	// === Issue pool ===
 	case "listIssues":
@@ -526,9 +657,9 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 			return nil, err
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
-	case "deliverDelivery":
+	case "submitDelivery":
 		art := objMap(args, "artifacts")
-		out, err := s.issueSvc.DeliverAndWaitReview(
+		out, err := s.issueSvc.SubmitDelivery(
 			memberID,
 			str(args, "issue_id"),
 			str(args, "summary"),
@@ -820,12 +951,7 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		actions := make([]map[string]any, 0, 2)
-		actions = append(actions, map[string]any{
-			"tool": "listIssueTasks",
-			"args": map[string]any{"issue_id": task.IssueID, "status": "open"},
-			"note": "List open tasks. Reserved tasks include reserved_token.",
-		})
+		actions := make([]map[string]any, 0, 1)
 		if task.NextStepToken != "" {
 			if tok, err := s.issueSvc.ReadNextStepToken(task.IssueID, task.NextStepToken); err == nil {
 				if tok.NextStep.Type == "claim_task" && tok.NextStep.TaskID != "" {
@@ -1039,7 +1165,7 @@ func (s *Server) dispatch(name string, args map[string]any) (any, error) {
 		return nil, s.lockSvc.ForceUnlock(str(args, "lease_id"), str(args, "reason"))
 
 	default:
-		return nil, fmt.Errorf("unknown tool: %s", name)
+		return nil, fmt.Errorf("unknown tool: %s", tool)
 	}
 }
 

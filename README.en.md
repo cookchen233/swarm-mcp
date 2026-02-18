@@ -22,7 +22,6 @@ This project implements an **issue-centric** workflow:
 - Task state linkage:
   - `kind=question|blocker` => task auto-transitions to `blocked`
   - `kind=reply` => task auto-transitions back to `in_progress`
-- Strict mode (default): hide non-blocking ask primitive in `tools/list` so workers prefer blocking ask
 
 ## Design Notes
 
@@ -53,11 +52,54 @@ Message linkage:
 - **Cross-process safety**: writes are guarded by a global lock file (`$SWARM_MCP_ROOT/.global.lock`)
 - **Expired takeover**: after lease expiry, other windows can acquire the lock; audit records are emitted
 
-### Strict Mode
+### Three Role-Specific Binaries (Recommended)
 
-- Enabled by default: `SWARM_MCP_STRICT != "0"`
-- In strict mode: `tools/list` **hides** `postIssueTaskMessage`, so workers are guided to use blocking `askIssueTask`
-- Note: current behavior is “hide”, not “hard reject”. (Hard reject can be added if you need stronger enforcement.)
+To reduce tool surface area per model and avoid role confusion, it is recommended to configure three different MCP servers (three binaries) in your MCP host:
+
+- `swarm-mcp-lead`
+- `swarm-mcp-worker`
+- `swarm-mcp-acceptor`
+
+Notes:
+
+- The server has a built-in **role allowlist**: `tools/list` only returns tools allowed for that role; `tools/call` will error if a tool is not allowed.
+
+#### MCP host config example (mcp_config.json)
+
+Below is a recommended `disabledTools` list. The goal is to reduce info overload and further prevent models from using tools that often cause confusion (non-blocking messages / doc writes / locks).
+
+```json
+{
+  "swarm-mcp-lead": {
+    "command": "/path/to/bin/swarm-mcp-lead",
+    "disabledTools": [
+      "closeIssue",
+      "reopenIssue",
+      "forceUnlock"
+    ]
+  },
+  "swarm-mcp-worker": {
+    "command": "/path/to/bin/swarm-mcp-worker",
+    "disabledTools": [
+      "postIssueTaskMessage",
+      "listLocks"
+    ]
+  },
+  "swarm-mcp-acceptor": {
+    "command": "/path/to/bin/swarm-mcp-acceptor",
+    "disabledTools": [
+      "getIssue",
+      "getIssueTask",
+      "listSharedDocs",
+      "listIssueDocs",
+      "listTaskDocs",
+      "readSharedDoc",
+      "readIssueDoc",
+      "readTaskDoc"
+    ]
+  }
+}
+```
 
 ### IDs / Session Context
 
@@ -66,9 +108,9 @@ Message linkage:
   - `listIssues(status=...)` / `listOpenedIssues` / `getIssue`
   - `listIssueTasks(issue_id, status=...)` / `listIssueOpenedTasks(issue_id)` / `getIssueTask`
 
-In addition, this server introduces a **strongly required `session_id`** as a window/session isolation token (cookie-like semantics):
+In addition, this server introduces a **strongly required `session_id`** as a semantic-session token (cookie-like semantics):
 
-- Each window MUST call `openSession` first to obtain its own `session_id`.
+- You MUST first obtain a valid `session_id` (semantic session id) via `session-mcp.upsertSemanticSession`.
 - After that, **every `tools/call` MUST include `session_id`** (otherwise the server returns an error).
 
 ### Docs Library: shared vs issue vs task
@@ -118,7 +160,7 @@ You need to:
 You are the Lead.
 
 [Collaboration rules]
-- You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
+- You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - First check if there is an existing issue with almost the same subject that is not closed; if so, close it and recreate.
 - Preferred flow: createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply.
 - Unless explicitly requested: you must act as a lead only (split tasks / answer questions / review / event loop). Do not implement tasks yourself and do not edit the workers' target code files.
@@ -126,11 +168,11 @@ You are the Lead.
 - Issues have a lease timeout. Based on createIssue/getIssue lease fields, call extendIssueLease in time (use swarmNow for server time).
 - **Strong constraint**: when waitIssueTaskEvents returns a signal, you MUST reason carefully and handle it.
 - **Strong constraint**: after handling, keep calling waitIssueTaskEvents until all tasks are completed and you call closeIssue.
-- **Acceptance closed-loop**: when all tasks are completed, you must deliver to the acceptor by calling deliverDelivery(issue_id, summary=...).
-  - deliverDelivery MUST include structured artifacts (at least test_result=passed|failed, test_cases[...], changed_files[...], reviewed_refs[...])
+- **Acceptance closed-loop**: when all tasks are completed, you must deliver to the acceptor by calling submitDelivery(issue_id, summary=...).
+  - submitDelivery MUST include structured artifacts (at least test_result=passed|failed, test_cases[...], changed_files[...], reviewed_refs[...])
   - changed_files is validated only by a minimum-count rule: changed_files count must be >= the de-duplicated union size of changed files submitted by completed tasks; errors do not reveal missing details (to encourage lead self-review).
-  - deliverDelivery will block until the acceptor calls reviewDelivery and returns a conclusion (approved / rejected)
-  - If verdict=rejected: organize fixes and re-deliver (call deliverDelivery again) until approved or you explicitly end the issue
+  - submitDelivery will block until the acceptor calls reviewDelivery and returns a conclusion (approved / rejected)
+  - If verdict=rejected: organize fixes and re-deliver (call submitDelivery again) until approved or you explicitly end the issue
 ```
 
 ##### Worker Prompt
@@ -143,7 +185,7 @@ If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
 You are a Worker.
 
 [Collaboration rules]
-- You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
+- You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - Claim tasks: listOpenedIssues -> listIssueOpenedTasks -> claimIssueTask.
 - When you see no open issues or tasks, call waitIssues or waitIssueTasks immediately.
 - Before starting, read context: prioritize task doc_paths / required_*_docs via readIssueDoc / readTaskDoc.
@@ -164,7 +206,7 @@ If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
 You are the Acceptor.
 
 [Collaboration rules]
-- You MUST call openSession first to obtain session_id. All tool calls MUST include this session_id.
+- You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - Review flow: waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle(issue_id) -> reviewDelivery.
 - If there are no open deliveries, call waitDeliveries(status=open) and keep waiting.
 - After receiving a delivery:
@@ -176,12 +218,12 @@ You are the Acceptor.
 
 ###### Blocking / Long-Poll Semantics (Quick Reference)
 
-Some tools are intentionally blocking (hanging) to support passive event loops and strict collaboration.
+Some tools are intentionally blocking (hanging) to support passive event loops and collaboration.
 
 | Tool | Blocks? | Returns when | Default / fixed timeout | Notes |
 | --- | --- | --- | --- | --- |
 | `waitIssueTaskEvents(issue_id)` | Yes | Signals only: `question/blocker` or `issue_task_submitted` | Fixed 3600s | Lead passive loop; returns at most 1 signal event per call; ignores other events and keeps hanging |
-| `deliverDelivery(issue_id, ...)` | Yes | After delivery, until acceptor `reviewDelivery` returns a conclusion | Default 3600s (configurable) | Lead delivers to acceptor; MUST provide structured `artifacts` (at least `test_result`/`test_cases`/`changed_files`/`reviewed_refs`) |
+| `submitDelivery(issue_id, ...)` | Yes | After delivery, until acceptor `reviewDelivery` returns a conclusion | Default 3600s (configurable) | Lead delivers to acceptor; MUST provide structured `artifacts` (at least `test_result`/`test_cases`/`changed_files`/`reviewed_refs`) |
 | `waitDeliveries(status=open, ...)` | Yes | Returns immediately if matching deliveries exist, otherwise waits until one appears (or timeout) | Default 3600s (configurable) | Acceptor passive loop; returns deliveries list (usually take the first one) |
 | `submitIssueTask(issue_id, task_id, ...)` | Yes | After submitting, until lead review produces `reviewed/resolved` events | Fixed 3600s | Submission must include structured `artifacts`; prevents workers from exiting immediately after submitting |
 | `askIssueTask(issue_id, task_id, ...)` | Yes | Lead replies via `replyIssueTaskMessage` | Default 3600s (configurable) | Posts `question/blocker` first, then waits for reply |
@@ -219,7 +261,7 @@ Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no confl
    - `getNextStepToken(issue_id, task_id, worker_id, completion_score=1|2|5)` -> server auto-picks and reserves the next task (or end), returns `next_step_token`
    - `reviewIssueTask(issue_id, task_id, verdict="approved|rejected", feedback="...", completion_score=1|2|5, artifacts={review_summary:"...", reviewed_refs:[...]}, feedback_details=[...], next_step_token="...")`
 
-4. **Q&A (recommended in strict mode)**
+4. **Q&A**
    - Worker: `askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=3600)`
    - Lead: `replyIssueTaskMessage(issue_id, task_id, content="...")`
 
@@ -248,8 +290,7 @@ Add the server config:
       "command": "/ABS/PATH/TO/swarm-mcp/bin/swarm-mcp",
       "args": [],
       "env": {
-        "SWARM_MCP_ROOT": "/Users/you/.swarm-mcp/<project_key>",
-        "SWARM_MCP_STRICT": "1"
+        "SWARM_MCP_ROOT": "/Users/you/.swarm-mcp/<project_key>"
       }
     }
   }
@@ -262,10 +303,11 @@ Add the server config:
   - Data directory root
   - **Default**: `$HOME/.swarm-mcp`
   - Recommended: isolate per project, e.g. `~/.swarm-mcp/<project_key>`
-- `SWARM_MCP_STRICT`
-  - Strict tool exposure switch
-  - **Default**: enabled (any value other than `0`)
-  - Set to `0` to return full tool list (including `postIssueTaskMessage`)
+
+- `SWARM_MCP_ROLE` (legacy `swarm-mcp` binary only)
+  - Optional values: `lead` | `worker` | `acceptor`
+  - If unset: exposes all tools (full-access debug mode); a WARNING is printed to stderr
+  - For production use the role-specific binaries (`swarm-mcp-lead` etc.) instead — this variable is not needed there
 
 ## Data Directory Layout
 
@@ -315,7 +357,7 @@ $SWARM_MCP_ROOT/
 5. `unlock`
 6. `submitIssueTask`
 
-### Worker Q&A (preferred in strict mode)
+### Worker Q&A
 
 - Use `askIssueTask(kind=question|blocker, ...)`
   - The call blocks until the lead uses `replyIssueTaskMessage`
@@ -327,7 +369,6 @@ $SWARM_MCP_ROOT/
 See “MCP Client Configuration” above. Recommended settings:
 
 - `SWARM_MCP_ROOT=~/.swarm-mcp/<project_key>` (isolate per project)
-- `SWARM_MCP_STRICT=1` (strict by default)
 - `SWARM_MCP_SUGGESTED_MIN_TASK_COUNT`: suggested minimum task count
 - `SWARM_MCP_MAX_TASK_COUNT`: maximum tasks allowed per issue (enforced at `createIssueTask`; rejects when exceeded)
 - `SWARM_MCP_ISSUE_TTL_SEC=3600`: issue lease TTL (auto-canceled as `canceled` when expired)
@@ -340,7 +381,7 @@ Restart your MCP host/client and ensure swarm-mcp tools show up.
 - **Window A (Lead)**: split work, answer questions, review/accept (usually no direct code edits)
 - **Window B (Worker)**: claim tasks, lock files, implement, submit
 
-Each window has its own `member_id` (via `whoAmI`) for audit/traceability.
+Each window has its own `member_id` (via `myProfile`) for audit/traceability.
 
 ### Step 2: Lead Creates the Issue and Tasks
 
@@ -365,7 +406,7 @@ Each window has its own `member_id` (via `whoAmI`) for audit/traceability.
 - `getNextStepToken` to mint a typed next step token (server auto-assigns + reserves; `end` or `claim_task`)
 - `reviewIssueTask` (must include `completion_score`, `feedback_details`, `artifacts`, and `next_step_token`)
 
-### Step 5: Q&A / Blocking (Validate strict + ask)
+### Step 5: Q&A / Blocking
 
 - worker: `askIssueTask(kind=question|blocker, ...)` (blocks)
 - lead: `replyIssueTaskMessage(...)`
@@ -453,20 +494,14 @@ trash "$SWARM_MCP_ROOT"
 - **Check the command path**: it should point to an executable like `bin/swarm-mcp`
 - **Restart the MCP host/client**: stdio MCP servers are typically relaunched on restart
 
-### 2) Why is `postIssueTaskMessage` missing?
-
-- In strict mode it is **hidden** from `tools/list` (not removed).
-- The preferred worker ask path is `askIssueTask` (blocks until reply).
-- To expose the full tool list: set `SWARM_MCP_STRICT=0`.
-
-### 3) `askIssueTask` blocks forever / times out
+### 2) `askIssueTask` blocks forever / times out
 
 - Expected behavior: it blocks until the lead calls `replyIssueTaskMessage`.
 - If it times out:
   - ensure the lead replied to the same `issue_id/task_id`
   - ensure both windows are using the same `SWARM_MCP_ROOT` (easy to misconfigure when isolating projects)
 
-### 4) `waitIssueTaskEvents` returns nothing
+### 3) `waitIssueTaskEvents` returns nothing
 
 - It is a long-poll API:
   - if there are no new events, they return an empty array after `timeout_sec`
@@ -477,7 +512,7 @@ Recommended pattern:
 - first call: `after_seq=0`
 - then: update `after_seq` to the returned `next_seq`
 
-### 5) Lock issues (lockFiles fails / looks like a deadlock)
+### 4) Lock issues (lockFiles fails / looks like a deadlock)
 
 - `lockFiles` failure usually means:
   - the file is locked by another window
@@ -490,8 +525,8 @@ Recommended pattern:
 
 - **Root cause (historical)**: if lead/worker share one stdio server process and the server processes requests synchronously, a long-poll call can block other calls.
 - **Current implementation**: the server now handles requests concurrently and uses a strongly required `session_id` to isolate windows.
-- **Correct usage**: call `openSession` per window and include `session_id` in every `tools/call`.
-- **Debugging**: if you see `session_id is required` or `unknown session_id`, the window did not call `openSession` first, or is using the wrong session_id.
+- **Correct usage**: obtain a `session_id` per window via `session-mcp.upsertSemanticSession`, and include `session_id` in every `tools/call`.
+- **Debugging**: if you see `session_id is required` or `invalid semantic session`, the window has no valid semantic session id, or is using the wrong session_id.
 
 ## Key Tools (Summary)
 
@@ -506,7 +541,7 @@ Recommended pattern:
   - `writeIssueDoc`, `readIssueDoc`, `listIssueDocs`
   - `writeTaskDoc`, `readTaskDoc`, `listTaskDocs`
 - Worker
-  - `registerWorker`, `listWorkers`, `getWorker`, `whoAmI`
+  - `registerWorker`, `listWorkers`, `getWorker`, `myProfile`
 - Locks
   - `lockFiles`, `heartbeat`, `unlock`, `listLocks`, `forceUnlock`
 

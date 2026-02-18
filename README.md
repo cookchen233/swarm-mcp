@@ -22,7 +22,6 @@
 - Task 状态机联动：
   - `kind=question|blocker` → task 自动置为 `blocked`
   - `kind=reply` → task 自动解除回 `in_progress`
-- 严格模式（默认）：在 `tools/list` 中隐藏非阻塞提问原语，引导 worker 走阻塞式 ask
 
 ## 设计要点
 
@@ -53,11 +52,54 @@ open -> in_progress -> submitted -> done
 - **跨进程安全**：写入操作使用全局文件锁（`$SWARM_MCP_ROOT/.global.lock`）保证多窗口一致性
 - **过期抢占**：租约过期后可被其他人获取，审计日志会记录
 
-### Strict 模式说明
+### 三角色二进制（推荐）
 
-- 严格模式默认开启：`SWARM_MCP_STRICT != "0"`
-- 严格模式下：`tools/list` **隐藏** `postIssueTaskMessage`，引导 worker 使用阻塞式 `askIssueTask`
-- 说明：当前实现是“隐藏工具”，不是“硬拒绝调用”。（如需要可再加服务端拒绝策略）
+为了减少单个模型的工具面、避免角色职责混乱，推荐在 MCP host 层配置三个不同二进制：
+
+- `swarm-mcp-lead`
+- `swarm-mcp-worker`
+- `swarm-mcp-acceptor`
+
+说明：
+
+- 服务端内置 **role allowlist**：`tools/list` 仅返回该角色允许的工具；`tools/call` 调用越权工具会直接报错
+
+#### MCP host 配置示例（mcp_config.json）
+
+下面给出一套推荐的 `disabledTools` 清单：目标是减少信息膨胀，并进一步阻止模型走“非阻塞消息/写文档/锁”等容易引发混乱的工具。
+
+```json
+{
+  "swarm-mcp-lead": {
+    "command": "/path/to/bin/swarm-mcp-lead",
+    "disabledTools": [
+      "closeIssue",
+      "reopenIssue",
+      "forceUnlock"
+    ]
+  },
+  "swarm-mcp-worker": {
+    "command": "/path/to/bin/swarm-mcp-worker",
+    "disabledTools": [
+      "postIssueTaskMessage",
+      "listLocks"
+    ]
+  },
+  "swarm-mcp-acceptor": {
+    "command": "/path/to/bin/swarm-mcp-acceptor",
+    "disabledTools": [
+      "getIssue",
+      "getIssueTask",
+      "listSharedDocs",
+      "listIssueDocs",
+      "listTaskDocs",
+      "readSharedDoc",
+      "readIssueDoc",
+      "readTaskDoc"
+    ]
+  }
+}
+```
 
 ### ID / 会话机制（为什么要显式传 issue_id/task_id）
 
@@ -66,9 +108,9 @@ open -> in_progress -> submitted -> done
   - `listIssues(status=...)` / `listOpenedIssues` / `getIssue`
   - `listIssueTasks(issue_id, status=...)` / `listIssueOpenedTasks(issue_id)` / `getIssueTask`
 
-另外：本 server 引入了 **session_id（强约束）** 作为“窗口隔离令牌”（类似 cookie 的作用）：
+另外：本 server 引入了 **session_id（强约束）** 作为“调用者语义会话令牌”（类似 cookie 的作用）：
 
-- 每个窗口必须先调用 `openSession` 拿到自己的 `session_id`
+- 你需要先通过 `session-mcp.upsertSemanticSession` 获取一个有效的 `session_id`（semantic session id）
 - 后续 **所有 tools/call 都必须携带 `session_id`**，否则服务端会直接报错
 
 ### Docs Library：shared / issue / task 的区别
@@ -118,17 +160,16 @@ Phase 2（协作注入期）
 你是 Lead。
 
 [协作规则]
-- 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
+- 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 先查看是否有与本 issue 的主题几乎相同并尚未关闭的 issue, 如果有, 请直接先关闭它重建
 - 推荐流程：createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply
 - 未经明确要求：你必须只做 lead（拆分/答疑/验收/事件循环），不要自己下场实现需求、不要去改 worker 的目标代码文件
 - Q&A：worker 用 askIssueTask；你必须用同一个 issue_id/task_id 通过 replyIssueTaskMessage 回复
 - issue 有超时关闭机制，根据 createIssue/getIssue 返回的过期时间，请在过期前5分钟使用 extendIssueLease 及时续约(可通过 swarmNow 获取当前时间)
 - **强约束** 调用 waitIssueTaskEvents 接收到事件后需要仔细推理分析并处理该事件，处理完后需要继续不断调用 waitIssueTaskEvents
-- **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 deliverDelivery。
-  - deliverDelivery 会挂起直到验收方调用 reviewDelivery 给出结论（approved / rejected）
-  - 验收方流程：waitDeliveries(status=open) -> claimDelivery -> reviewDelivery
-  - 若 verdict=rejected：你需要根据反馈组织修复与再次交付（再次调用 deliverDelivery），直到通过或你明确终止该 issue
+- **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 submitDelivery。
+  - submitDelivery 会挂起直到验收方给出结论（approved / rejected）
+  - 若结论为 rejected，你需要仔细推理分析并修复，然后再次调用 submitDelivery，如此反复，直到通过或你明确认为结论有误则可终止该 issue
 - 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成整个协作流程直至交付, 在取得最终成功后, 调用 closeIssue 关闭该 issue
 ```
 
@@ -142,7 +183,7 @@ Phase 2（协作注入期）
 你是 Worker。
 
 [协作规则]
-- 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
+- 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 领取任务：waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
 - 开工前先补齐上下文：尽可能获得 Issue 相关信息，优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
@@ -163,7 +204,7 @@ Phase 2（协作注入期）
 你是 验收（Acceptor）。
 
 [协作规则]
-- 必须先调用 openSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
+- 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 验收流程：waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
 - 收到 delivery 后：
   - 使用 delivery.issue_id 调用 getIssueAcceptanceBundle 拉取完整信息
@@ -181,7 +222,7 @@ Phase 2（协作注入期）
 | 工具 | 是否挂起 | 何时返回 | 默认/固定超时 | 备注 |
 | --- | --- | --- | --- | --- |
 | `waitIssueTaskEvents(issue_id)` | 是 | 仅当出现 `question/blocker` 或 `issue_task_submitted` 信号 | 固定 3600s | Lead 被动事件循环；一次最多返回 1 条 signal；忽略其它事件并继续挂起 |
-| `deliverDelivery(issue_id, ...)` | 是 | 交付后，直到验收方 `reviewDelivery` 返回结论 | 默认 3600s（可传） | Lead 交付给验收方；必须提供结构化 `artifacts`（至少 `test_result`/`test_cases`/`changed_files`/`reviewed_refs`） |
+| `submitDelivery(issue_id, ...)` | 是 | 交付后，直到验收方 `reviewDelivery` 返回结论 | 默认 3600s（可传） | Lead 交付给验收方；必须提供结构化 `artifacts`（至少 `test_result`/`test_cases`/`changed_files`/`reviewed_refs`） |
 | `waitDeliveries(status=open, ...)` | 是 | delivery 池中出现新的 open delivery（按数量增长触发） | 默认 3600s（可传） | 验收方被动等待交付；返回 deliveries 列表（通常取第一条） |
 | `submitIssueTask(issue_id, task_id, ...)` | 是 | 提交后，直到 lead `reviewIssueTask` 产生 `reviewed/resolved` 事件 | 固定 3600s | 提交必须携带结构化 `artifacts`；用于防止 worker 提交后立即结束对话 |
 | `askIssueTask(issue_id, task_id, ...)` | 是 | lead `replyIssueTaskMessage` 回复后 | 默认 3600s（可传） | 会先发出 `question/blocker` 再等待 reply |
@@ -216,7 +257,7 @@ Phase 2（协作注入期）
    - `getNextStepToken(issue_id, task_id, worker_id, completion_score=1|2|5)` -> 服务端自动挑选并预留 next task，返回 `next_step_token`
    - `reviewIssueTask(issue_id, task_id, verdict="approved|rejected", feedback="...", completion_score=1|2|5, artifacts={review_summary:"...", reviewed_refs:[...]}, feedback_details=[...], next_step_token="...")`
 
-4. **Q&A（严格模式推荐）**
+4. **Q&A**
    - Worker：`askIssueTask(issue_id, task_id, kind="question", content="...", timeout_sec=3600)`
    - Lead：`replyIssueTaskMessage(issue_id, task_id, content="...")`
 
@@ -245,8 +286,7 @@ go build -o bin/swarm-mcp ./cmd/swarm-mcp/
       "command": "/ABS/PATH/TO/swarm-mcp/bin/swarm-mcp",
       "args": [],
       "env": {
-        "SWARM_MCP_ROOT": "/Users/you/.swarm-mcp/<project_key>",
-        "SWARM_MCP_STRICT": "1"
+        "SWARM_MCP_ROOT": "/Users/you/.swarm-mcp/<project_key>"
       }
     }
   }
@@ -259,10 +299,11 @@ go build -o bin/swarm-mcp ./cmd/swarm-mcp/
   - 数据目录根路径
   - **默认值**：`$HOME/.swarm-mcp`
   - 建议按项目隔离：`~/.swarm-mcp/<project_key>`
-- `SWARM_MCP_STRICT`
-  - 工具暴露“严格模式”开关
-  - **默认开启严格模式**：只要不是 `0` 都视为开启
-  - 设置为 `0`：在 `tools/list` 中返回全量工具（包含 `postIssueTaskMessage`）
+
+- `SWARM_MCP_ROLE`（仅 `swarm-mcp` legacy 二进制有效）
+  - 可选值：`lead` | `worker` | `acceptor`
+  - 不设置时：暴露全量工具（full-access debug 模式），stderr 会打印 WARNING
+  - 推荐生产用途改用三角色专用二进制（`swarm-mcp-lead` 等），无需此变量
 
 ## 数据目录结构
 
@@ -303,7 +344,7 @@ $SWARM_MCP_ROOT/
 1. 创建issue（`createIssue`）
 2. 分解tasks（`createIssueTask`）
 3. 等待tasks完成（`waitIssueTasks`、`listIssueTasks`）—— wait默认返回status=open的任务
-4. 交付issue（`deliverDelivery`，阻塞至验收）
+4. 交付issue（`submitDelivery`，阻塞至验收）
 5. 监控deliveries（`waitDeliveries`、`listOpenedDeliveries`）—— wait默认返回status=open的交付
 
 ### Worker窗口
@@ -390,20 +431,14 @@ trash "$SWARM_MCP_ROOT"
 - **检查 command 路径**：是否指向可执行文件 `bin/swarm-mcp`
 - **重启 MCP host**：stdio MCP server 一般需要重启后才会重新拉起
 
-### 2) 为什么找不到 `postIssueTaskMessage`？
-
-- 默认 strict 模式下它会从 `tools/list` **隐藏**（不是删除）
-- 期望的 worker 提问路径是 `askIssueTask`（阻塞直到 reply）
-- 需要暴露全量工具：设置 `SWARM_MCP_STRICT=0`
-
-### 3) `askIssueTask` 一直卡住/超时
+### 2) `askIssueTask` 一直卡住/超时
 
 - 正常行为：它会阻塞等待 lead 的 `replyIssueTaskMessage`
 - 若超时：
   - 确认 lead 是否对同一个 `issue_id/task_id` 调用了 `replyIssueTaskMessage`
   - 检查 lead 是否在另一个 `SWARM_MCP_ROOT`（多项目隔离时容易配错）
 
-### 4) `waitIssueTaskEvents` 没有返回事件
+### 3) `waitIssueTaskEvents` 没有返回事件
 
 - 这是一个 long-poll 接口：
   - 没新事件时会在 `timeout_sec` 后返回空数组
@@ -414,7 +449,7 @@ trash "$SWARM_MCP_ROOT"
 - 首次：`after_seq=0`
 - 每次返回后：把 `after_seq` 更新为返回的 `next_seq`
 
-### 5) 锁相关问题（lockFiles 失败 / 误以为死锁）
+### 4) 锁相关问题（lockFiles 失败 / 误以为死锁）
 
 - `lockFiles` 失败通常表示：
   - 目标文件已被其他窗口持锁
@@ -423,12 +458,12 @@ trash "$SWARM_MCP_ROOT"
   - `listLocks` 查看当前锁持有者与过期时间
   - 查看 `$SWARM_MCP_ROOT/trace/events.jsonl`（包含 lock_expired / lock_forced 等审计）
 
-### 6) 为什么两个窗口“互相卡住”：lead 在 wait，worker 连 listIssueTasks 也像挂起
+### 5) 为什么两个窗口“互相卡住”：lead 在 wait，worker 连 listIssueTasks 也像挂起
 
 - **已解决的根因**：如果 lead/worker 复用同一个 server 进程（stdio transport），且 server 同步串行处理请求，则长轮询会把其它调用堵住。
 - **当前实现**：server 已改为并发处理请求（避免 long-poll 堵住其它调用），并引入 session_id 作为窗口隔离令牌。
-- **正确姿势**：两个窗口分别 `openSession`，并在每次 tools/call 的 arguments 中带上各自的 `session_id`。
-- **排查**：若你看到 `session_id is required` 或 `unknown session_id`，说明该窗口未先 `openSession`，或复用了错误的 session_id。
+- **正确姿势**：两个窗口分别通过 `session-mcp.upsertSemanticSession` 获取各自的 `session_id`，并在每次 tools/call 的 arguments 中带上该 `session_id`。
+- **排查**：若你看到 `session_id is required` 或 `invalid semantic session`，说明该窗口未先获取有效的 semantic session id，或复用了错误的 session_id。
 
 ## 主要工具（摘要）
 
@@ -443,7 +478,7 @@ trash "$SWARM_MCP_ROOT"
   - `writeIssueDoc`, `readIssueDoc`, `listIssueDocs`
   - `writeTaskDoc`, `readTaskDoc`, `listTaskDocs`
 - Worker
-  - `registerWorker`, `listWorkers`, `getWorker`, `whoAmI`
+  - `registerWorker`, `listWorkers`, `getWorker`, `myProfile`
 - Locks
   - `lockFiles`, `heartbeat`, `unlock`, `listLocks`, `forceUnlock`
 

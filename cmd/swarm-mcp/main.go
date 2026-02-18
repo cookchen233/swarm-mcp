@@ -8,10 +8,13 @@ import (
 
 	"github.com/cookchen233/swarm-mcp/internal/mcp"
 	"github.com/cookchen233/swarm-mcp/internal/swarm"
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	logger := log.New(os.Stderr, "swarm-mcp: ", log.LstdFlags|log.LUTC)
+
+	_ = godotenv.Load()
 
 	// Data root: ~/.swarm-mcp/ by default, override with SWARM_MCP_ROOT
 	root := os.Getenv("SWARM_MCP_ROOT")
@@ -72,11 +75,16 @@ func main() {
 		defaultTimeoutSec = 3600
 	}
 
+	role := os.Getenv("SWARM_MCP_ROLE")
+	if role == "" {
+		logger.Printf("WARNING: SWARM_MCP_ROLE not set; running in full-access debug mode (all tools exposed). Set SWARM_MCP_ROLE=lead|worker|acceptor for role-scoped access.")
+	}
+
 	srv := mcp.NewServer(mcp.ServerConfig{
 		Name:                  "swarm-mcp",
 		Version:               "0.1.0",
 		Logger:                logger,
-		Strict:                os.Getenv("SWARM_MCP_STRICT") != "0",
+		Role:                  role,
 		SuggestedMinTaskCount: suggestedMinTaskCount,
 		MaxTaskCount:          maxTaskCount,
 		IssueTTLSec:           issueTTLSec,
