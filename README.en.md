@@ -16,6 +16,8 @@ This project implements an **issue-centric** workflow:
 
 - Issue pool: disseminate work as a pool, workers claim tasks freely
 - Worker identity registration for traceability
+- **Role codes (strong security)**: role-based environment variable codes to prevent cross-role tool calls
+- **Worker ID binding (identity constraint)**: workers must use employee ID (worker_id) to claim and operate tasks, preventing operation of others' tasks
 - Event stream:
   - `waitIssueTaskEvents`: issue-level select-like long-poll
 - Blocking Q&A: `askIssueTask` (worker blocks until lead replies)
@@ -51,6 +53,31 @@ Message linkage:
 - **Atomic multi-file locking**: `lockFiles(files=[...])` is all-or-nothing
 - **Cross-process safety**: writes are guarded by a global lock file (`$SWARM_MCP_ROOT/.global.lock`)
 - **Expired takeover**: after lease expiry, other windows can acquire the lock; audit records are emitted
+
+### Role Codes (Role-Based Access Control)
+
+To prevent cross-role tool calls, Swarm MCP supports environment variable-based **role_code** mechanism:
+
+- **SWARM_MCP_ROLE_CODE_LEAD**: Lead role code
+- **SWARM_MCP_ROLE_CODE_WORKER**: Worker role code
+- **SWARM_MCP_ROLE_CODE_ACCEPTOR**: Acceptor role code
+
+When configured for a role:
+
+- `tools/list` automatically injects `role_code` (required) into all tool input schemas
+- `tools/call` must carry the correct `role_code`, or the call is rejected
+- Unconfigured roles: no injection, no validation (debug-compatible mode)
+
+### Worker ID Binding (Identity Constraint)
+
+Workers must use **employee ID (worker_id)** for identity binding when operating tasks:
+
+- **claimIssueTask** must pass `worker_id` (employee ID), task is marked as claimed by this employee
+- **submitIssueTask**, **askIssueTask**, **postIssueTaskMessage** must use the same `worker_id`, server validates `task.claimed_by == worker_id`
+- **lockFiles** (when `task_id` is provided) must also pass `issue_id` and `worker_id`, server validates task ownership
+- **heartbeat** / **unlock** must use `worker_id`, server validates `lease.owner == worker_id`
+
+This ensures: a worker can only operate tasks they have claimed, preventing task hijacking or unauthorized operations.
 
 ### Three Role-Specific Binaries (Recommended)
 
@@ -110,7 +137,7 @@ Below is a recommended `disabledTools` list. The goal is to reduce info overload
 
 In addition, this server introduces a **strongly required `session_id`** as a semantic-session token (cookie-like semantics):
 
-- You MUST first obtain a valid `session_id` (semantic session id) via `session-mcp.upsertSemanticSession`.
+- You MUST first obtain a valid `session_id` via `session-mcp.upsertSemanticSession`.
 - After that, **every `tools/call` MUST include `session_id`** (otherwise the server returns an error).
 
 ### Docs Library: shared vs issue vs task
@@ -160,11 +187,13 @@ You need to:
 You are the Lead.
 
 [Collaboration rules]
+- **Role code**: All tool calls must carry role_code=<LEAD_TOKEN>
 - You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - First check if there is an existing issue with almost the same subject that is not closed; if so, close it and recreate.
 - Preferred flow: createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply.
 - Unless explicitly requested: you must act as a lead only (split tasks / answer questions / review / event loop). Do not implement tasks yourself and do not edit the workers' target code files.
 - Q&A: workers use askIssueTask; you MUST reply using replyIssueTaskMessage with the same issue_id/task_id.
+- **Worker ID mechanism**: When reviewing tasks, use getNextStepToken with the correct worker_id (employee ID).
 - Issues have a lease timeout. Based on createIssue/getIssue lease fields, call extendIssueLease in time (use swarmNow for server time).
 - **Strong constraint**: when waitIssueTaskEvents returns a signal, you MUST reason carefully and handle it.
 - **Strong constraint**: after handling, keep calling waitIssueTaskEvents until all tasks are completed and you call closeIssue.
@@ -185,6 +214,8 @@ If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
 You are a Worker.
 
 [Collaboration rules]
+- **Role code**: All tool calls must carry role_code=<WORKER_TOKEN>
+- **Worker ID binding**: When claiming tasks, you must pass worker_id (your employee ID). All subsequent task-related operations (submit/ask/lock/heartbeat/unlock) must use the same worker_id.
 - You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - Claim tasks: listOpenedIssues -> listIssueOpenedTasks -> claimIssueTask.
 - When you see no open issues or tasks, call waitIssues or waitIssueTasks immediately.
@@ -206,6 +237,7 @@ If you cannot see swarm-mcp tools in your MCP host: first try tools/list.
 You are the Acceptor.
 
 [Collaboration rules]
+- **Role code**: All tool calls must carry role_code=<ACCEPTOR_TOKEN>
 - You MUST obtain a session_id via session-mcp.upsertSemanticSession first. All tool calls MUST include this session_id.
 - Review flow: waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle(issue_id) -> reviewDelivery.
 - If there are no open deliveries, call waitDeliveries(status=open) and keep waiting.
@@ -247,7 +279,7 @@ Note: task IDs are issue-local sequential IDs: `task-1`, `task-2`, ... (no confl
    - `lockFiles(task_id, files=["path/to/file.go"], ttl_sec=120, wait_sec=60)`
    - (implement changes; `heartbeat(lease_id)` while holding)
    - `unlock(lease_id)`
-   - `submitIssueTask(issue_id, task_id, artifacts={summary:"...", changed_files:[...], diff:"...", links:[...]})` -> blocks until lead review
+   - `submitIssueTask(issue_id, task_id, artifacts={summary:"...", changed_files:[...], diff:"...", links:[...], test_cases:[...], test_result:"passed|failed", test_output:"..."})` -> blocks until lead review
 
    The worker should run this as a loop:
 
@@ -503,14 +535,10 @@ trash "$SWARM_MCP_ROOT"
 
 ### 3) `waitIssueTaskEvents` returns nothing
 
-- It is a long-poll API:
-  - if there are no new events, they return an empty array after `timeout_sec`
-  - the intended usage is cursor-based: `after_seq` / `next_seq`
-
-Recommended pattern:
-
-- first call: `after_seq=0`
-- then: update `after_seq` to the returned `next_seq`
+- It is a signals-only long-poll API:
+  - if there are no new signal events, it returns an empty array after timeout
+  - **You do not need (and cannot) pass `after_seq`**: the server persists/resumes a cursor per `(issue_id, member_id)` for the lead window
+  - intended usage: handle the returned event (if any), then keep calling `waitIssueTaskEvents(issue_id)`
 
 ### 4) Lock issues (lockFiles fails / looks like a deadlock)
 
@@ -548,9 +576,14 @@ Recommended pattern:
 ## Tests
 
 ```bash
+# Unit tests
 go test ./...
 
+# Integration tests (role_code and worker ID binding enabled by default)
 bash test.sh
+
+# Note: test.sh enables role_code and worker ID binding by default
+# For debugging, modify .env or comment out related environment variables
 ```
 
 ## License

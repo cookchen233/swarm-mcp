@@ -177,6 +177,8 @@ func (s *IssueService) SweepExpired() {
 					prevStatus := task.Status
 					prevOwner := task.ClaimedBy
 					task.Status = IssueTaskOpen
+					task.ReservedToken = ""
+					task.ReservedUntilMs = 0
 					task.ClaimedBy = ""
 					task.Submitter = ""
 					task.Submission = ""

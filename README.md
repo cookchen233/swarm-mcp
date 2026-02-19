@@ -16,6 +16,8 @@
 
 - Issue 池：任务以池的形式散播，worker 自由认领
 - Worker 身份登记：worker 领取任务后可追踪“谁做了什么”
+- 角色代码（强安全约束）：通过环境变量配置角色代码，防止跨角色工具调用
+- 工号绑定（身份约束）：worker 必须使用工号（worker_id）领取和操作任务，防止操作他人任务
 - 事件流：
   - `waitIssueTaskEvents`：issue 级 select-like
 - 阻塞式问答：`askIssueTask`（worker 提问后阻塞等待 lead reply）
@@ -51,6 +53,31 @@ open -> in_progress -> submitted -> done
 - **多文件原子锁**：`lockFiles(files=[...])` 要么全成功，要么全失败
 - **跨进程安全**：写入操作使用全局文件锁（`$SWARM_MCP_ROOT/.global.lock`）保证多窗口一致性
 - **过期抢占**：租约过期后可被其他人获取，审计日志会记录
+
+### 角色代码（Role Code）
+
+为了防止跨角色工具调用，Swarm MCP 支持基于环境变量的 **role_code** 机制：
+
+- **SWARM_MCP_ROLE_CODE_LEAD**：Lead 角色代码
+- **SWARM_MCP_ROLE_CODE_WORKER**：Worker 角色代码  
+- **SWARM_MCP_ROLE_CODE_ACCEPTOR**：Acceptor 角色代码
+
+当配置了对应角色的代码后：
+
+- `tools/list` 会自动在所有工具的 input schema 中注入 `role_code`（required）
+- `tools/call` 必须携带正确的 `role_code`，否则拒绝调用
+- 未配置代码的角色：不注入、不校验（兼容调试模式）
+
+### Worker 工号绑定（身份约束）
+
+Worker 在操作任务时必须使用 **工号（worker_id）** 进行身份绑定：
+
+- **claimIssueTask** 必须传 `worker_id`（工号），任务被标记为该工号领取
+- **submitIssueTask**、**askIssueTask**、**postIssueTaskMessage** 必须使用同一个 `worker_id`，服务端校验 `task.claimed_by == worker_id`
+- **lockFiles**（带 `task_id` 时）必须同时传 `issue_id` 和 `worker_id`，服务端校验任务归属
+- **heartbeat** / **unlock** 必须使用 `worker_id`，服务端校验 `lease.owner == worker_id`
+
+这确保：一个 worker 只能操作自己领取的任务，无法冒领或操作他人任务。
 
 ### 三角色二进制（推荐）
 
@@ -110,7 +137,7 @@ open -> in_progress -> submitted -> done
 
 另外：本 server 引入了 **session_id（强约束）** 作为“调用者语义会话令牌”（类似 cookie 的作用）：
 
-- 你需要先通过 `session-mcp.upsertSemanticSession` 获取一个有效的 `session_id`（semantic session id）
+- 你需要先通过 `session-mcp.upsertSemanticSession` 获取一个有效的 `session_id`
 - 后续 **所有 tools/call 都必须携带 `session_id`**，否则服务端会直接报错
 
 ### Docs Library：shared / issue / task 的区别
@@ -157,7 +184,7 @@ Phase 2（协作注入期）
 2) 然后用 swarm-mcp-lead 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
 
 [角色]
-你是 Lead。
+你是 Lead，role_code 为 123。
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
@@ -165,8 +192,9 @@ Phase 2（协作注入期）
 - 推荐流程：createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply
 - 未经明确要求：你必须只做 lead（拆分/答疑/验收/事件循环），不要自己下场实现需求、不要去改 worker 的目标代码文件
 - Q&A：worker 用 askIssueTask；你必须用同一个 issue_id/task_id 通过 replyIssueTaskMessage 回复
+- **工号机制**：reviewIssueTask 时需使用 getNextStepToken 并传入正确的 worker_id（工号）
 - issue 有超时关闭机制，根据 createIssue/getIssue 返回的过期时间，请在过期前5分钟使用 extendIssueLease 及时续约(可通过 swarmNow 获取当前时间)
-- **强约束** 调用 waitIssueTaskEvents 接收到事件后需要仔细推理分析并处理该事件，处理完后需要继续不断调用 waitIssueTaskEvents
+- **强约束** 调用 waitIssueTaskEvents 接收到事件后务必严苛审视每个细节，仔细推理分析并处理该事件，处理完后需要继续不断调用 waitIssueTaskEvents
 - **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 submitDelivery。
   - submitDelivery 会挂起直到验收方给出结论（approved / rejected）
   - 若结论为 rejected，你需要仔细推理分析并修复，然后再次调用 submitDelivery，如此反复，直到通过或你明确认为结论有误则可终止该 issue
@@ -179,16 +207,17 @@ Phase 2（协作注入期）
 你当前处于 MCP 协作模式，可以调用 swarm-mcp-worker 提供的工具来完成任务
 
 [角色]
-你是 Worker。
+你是 Worker，role_code 为 153, worker_id(工号) 为 jim。
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 领取任务：swarm-mcp-worker.waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
-- 开工前先补齐上下文：尽可能获得 Issue 相关信息，优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
+- 领取任务后务必查阅其关联的所有文档与信息，不放过任何一个文档与信息，并仔细推理分析每个细节
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
-- 若开发中因信息不足而不确定/遇到阻塞：使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
+- 开发中有任务不确定/或信息不足时请务必使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
 - task 有超时关闭机制，根据 claimIssueTask/getIssueTask 返回的过期时间，请在过期前5分钟使用 extendIssueTaskLease 及时续约(可通过 swarmNow 获取当前时间)
+- **强约束** 领取任务后务必仔细推理分析每个细节，阅读其关联的所有文档与信息，
 - **强约束** 完成任务后提交：submitIssueTask，根据返回的 next_actions 继续进行下一步
 - **强约束** 当所有 tasks 被完成后继续调用 waitIssues(status=open) 或 waitIssueTasks(status=open) 直至没有任何 open 状态的 issue
 ```
@@ -199,14 +228,14 @@ Phase 2（协作注入期）
 你当前处于 MCP 协作模式，可以调用 swarm-mcp-acceptor 提供的工具来完成验收
 
 [角色]
-你是 验收（Acceptor）。
+你是 验收（Acceptor），role_code 为 123153。
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 验收流程：swarm-mcp-acceptor.waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
 - 收到 delivery 后：
   - 使用 delivery.issue_id 调用 getIssueAcceptanceBundle 拉取完整信息
-  - **强约束** 你必须分析整个代码库以及已知的所有文档信息，充分推理分析后，调用 reviewDelivery 将结果反馈给 lead
+  - **强约束** 你必须分析整个代码库以及已知的所有文档信息，务必严苛审视每个细节，充分推理分析后，调用 reviewDelivery 将结果反馈给 lead
 - 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成协作流程直至验收成功
 - 当验收成功后继续调用 waitDeliveries(status=open) 直至没有任何 open 状态的 issue
 ```
@@ -241,7 +270,7 @@ Phase 2（协作注入期）
    - `lockFiles(task_id, files=["path/to/file.go"], ttl_sec=120, wait_sec=60)`
    - （编码；期间 `heartbeat(lease_id)`）
    - `unlock(lease_id)`
-   - `submitIssueTask(issue_id, task_id, artifacts={summary:"...", changed_files:[...], diff:"...", links:[...]})` -> 挂起等待 lead review
+   - `submitIssueTask(issue_id, task_id, artifacts={summary:"...", changed_files:[...], diff:"...", links:[...], test_cases:[...], test_result:"passed|failed", test_output:"..."})` -> 挂起等待 lead review
 
    Worker 侧建议把整个过程当作一个循环执行：
 
@@ -438,14 +467,10 @@ trash "$SWARM_MCP_ROOT"
 
 ### 3) `waitIssueTaskEvents` 没有返回事件
 
-- 这是一个 long-poll 接口：
-  - 没新事件时会在 `timeout_sec` 后返回空数组
-  - 正常用法是维护一个游标：`after_seq` / `next_seq`
-
-建议模式：
-
-- 首次：`after_seq=0`
-- 每次返回后：把 `after_seq` 更新为返回的 `next_seq`
+- 这是一个 signals-only long-poll 接口：
+  - 若没有新的 signal，会在超时后返回空数组
+  - **不需要也不支持传入 `after_seq`**：服务端会为 lead 窗口按 `(issue_id, member_id)` 自动持久化/恢复 cursor
+  - 正常用法是：处理完返回的事件后，继续调用 `waitIssueTaskEvents(issue_id)`
 
 ### 4) 锁相关问题（lockFiles 失败 / 误以为死锁）
 
@@ -486,8 +511,11 @@ trash "$SWARM_MCP_ROOT"
 # 单元测试
 go test ./...
 
-# 集成测试
+# 集成测试（默认启用 role_code 和工号机制）
 bash test.sh
+
+# 注意：test.sh 默认使用 role_code 和工号机制
+# 如需调试，可修改 .env 或注释相关环境变量
 ```
 
 ## License

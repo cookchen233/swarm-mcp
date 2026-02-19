@@ -1,6 +1,8 @@
 package swarm
 
 import (
+	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,8 +21,6 @@ func (s *IssueService) ResetTask(actor, issueID, taskID, reason string) (*IssueT
 		reason = "reset"
 	}
 
-	s.SweepExpired()
-
 	var result *IssueTask
 	err := s.store.WithLock(func() error {
 		if !s.store.Exists("issues", issueID, "issue.json") {
@@ -35,7 +35,13 @@ func (s *IssueService) ResetTask(actor, issueID, taskID, reason string) (*IssueT
 
 		// 1) Clear task reservation / tokens
 		if strings.TrimSpace(task.ReservedToken) != "" {
-			tokPath := s.store.Path("issues", issueID, "next_steps", task.ReservedToken+".json")
+			tok := strings.TrimSpace(task.ReservedToken)
+			tokPath := s.store.Path("issues", issueID, "next_steps", tok+".json")
+			_ = s.store.Remove(tokPath)
+		}
+		if strings.TrimSpace(task.NextStepToken) != "" {
+			tok := strings.TrimSpace(task.NextStepToken)
+			tokPath := s.store.Path("issues", issueID, "next_steps", tok+".json")
 			_ = s.store.Remove(tokPath)
 		}
 		task.ReservedToken = ""
@@ -99,6 +105,49 @@ func (s *IssueService) ResetTask(actor, issueID, taskID, reason string) (*IssueT
 		task.ReviewArtifacts = ReviewArtifacts{}
 		task.FeedbackDetails = nil
 		task.UpdatedAt = NowStr()
+
+		eventsPath := s.store.Path("issues", issueID, "events.jsonl")
+		if f, err := os.Open(eventsPath); err == nil {
+			tmp := eventsPath + ".tmp"
+			out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+			if err == nil {
+				w := bufio.NewWriter(out)
+				scanner := bufio.NewScanner(f)
+				buf := make([]byte, 0, 1024*1024)
+				scanner.Buffer(buf, 16*1024*1024)
+				for scanner.Scan() {
+					line := scanner.Bytes()
+					if len(line) == 0 {
+						continue
+					}
+					var ev IssueEvent
+					if err := json.Unmarshal(line, &ev); err != nil {
+						continue
+					}
+					if ev.TaskID == taskID {
+						continue
+					}
+					_, _ = w.Write(line)
+					_, _ = w.WriteString("\n")
+				}
+				_ = w.Flush()
+				_ = out.Close()
+				if err := scanner.Err(); err == nil {
+					_ = os.Rename(tmp, eventsPath)
+				} else {
+					_ = os.Remove(tmp)
+				}
+			} else {
+				_ = os.Remove(tmp)
+			}
+			_ = f.Close()
+		} else if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+		} else {
+			_ = f.Close()
+		}
 
 		// 4) Remove non-required task docs (keep required/spec docs created at task creation)
 		// RequiredTaskDocs can include subdirectories, so we do a WalkDir and compare by relative cleaned path.

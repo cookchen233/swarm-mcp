@@ -1,18 +1,18 @@
 {
   "sessions": [
     {
-      "id": "e07c4f520d2a1ebee46a05a99c331d07",
+      "id": "664bd251f45fa4d856d1b176a84d94db",
       "mcp_name": "session-mcp",
       "mode": "local",
-      "created_at": "2026-02-19T14:51:26.99061+08:00",
-      "last_active": "2026-02-19T14:51:27.070676+08:00"
+      "created_at": "2026-02-19T16:33:20.765664+08:00",
+      "last_active": "2026-02-19T16:33:20.86528+08:00"
     },
     {
-      "id": "b784cad3421f9197edb445474bb9d56f",
+      "id": "237ddc0c52dcddb6d8b0a29d981dbf9e",
       "mcp_name": "session-mcp",
       "mode": "local",
-      "created_at": "2026-02-19T14:51:28.274241+08:00",
-      "last_active": "2026-02-19T14:51:28.274241+08:00"
+      "created_at": "2026-02-19T16:33:22.197561+08:00",
+      "last_active": "2026-02-19T16:33:22.197561+08:00"
     }
   ]
 }

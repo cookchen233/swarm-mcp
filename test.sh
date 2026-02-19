@@ -4,6 +4,14 @@
 
 set -e
 
+# Ensure local security env and repo .env do not affect integration tests.
+# Note: binaries load .env via godotenv.Load(), which does NOT override existing env.
+# Therefore we export empty values here to force debug-compatible mode (no role_code required).
+export SWARM_MCP_ROLE_CODE=""
+export SWARM_MCP_ROLE_CODE_LEAD=""
+export SWARM_MCP_ROLE_CODE_WORKER=""
+export SWARM_MCP_ROLE_CODE_ACCEPTOR=""
+
 BIN="$(dirname "$0")/bin/swarm-mcp"
 export SWARM_MCP_ROOT="/tmp/swarm-mcp-test-$$"
 PASS=0
@@ -308,17 +316,7 @@ assert_contains "sees submitted" "$resp" "issue_task_submitted"
 
 echo "[Test 3.3] Review Issue Task"
 resp=$(tool_call 10 "getIssueTask" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\"}")
-WORKER_ID=$(echo "$resp" | grep -oE '"submitter"\s*:\s*"m_[0-9]+_[0-9a-f]+"' | grep -oE 'm_[0-9]+_[0-9a-f]+' | head -1)
-if [ -z "$WORKER_ID" ]; then
-    # fallback: first member-like token in response
-    WORKER_ID=$(echo "$resp" | grep -oE 'm_[0-9]+_[0-9a-f]+' | head -1)
-fi
-if [ -z "$WORKER_ID" ]; then
-    echo "FAILED to parse WORKER_ID from getIssueTask: $resp"
-    exit 1
-fi
-
-resp=$(tool_call 11 "getNextStepToken" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"worker_id\":\"$WORKER_ID\",\"completion_score\":5}")
+resp=$(tool_call 11 "getNextStepToken" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"worker_id\":\"$EMPLOYEE_ID\",\"completion_score\":5}")
 NEXT_STEP_TOKEN=$(echo "$resp" | grep -oE 'ns_[0-9]+_[0-9a-f]+' | head -1)
 if [ -z "$NEXT_STEP_TOKEN" ]; then
     echo "FAILED to parse next_step_token from getNextStepToken: $resp"

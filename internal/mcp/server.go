@@ -104,37 +104,46 @@ func (s *Server) Run() error {
 func (s *Server) memberIDForArgs(toolName string, args map[string]any) (string, error) {
 	// Strong constraint: all tools MUST carry a valid session_id.
 	if args == nil {
-		return "", fmt.Errorf("semantic_session_id or session_id is required")
+		return "", fmt.Errorf("session_id is required")
 	}
-	// Prefer semantic_session_id (newer naming), fall back to session_id (legacy naming).
-	semanticSessionID, _ := args["semantic_session_id"].(string)
-	if strings.TrimSpace(semanticSessionID) == "" {
-		semanticSessionID, _ = args["session_id"].(string)
+	var sessionID string
+	v, exists := args["session_id"]
+	if !exists || v == nil {
+		sessionID = ""
+	} else {
+		sessionID = fmt.Sprint(v)
 	}
-	semanticSessionID = strings.TrimSpace(semanticSessionID)
-	if semanticSessionID == "" {
-		return "", fmt.Errorf("semantic_session_id or session_id is required")
+	if strings.TrimSpace(sessionID) == "" {
+		if v, exists := args["semantic_session_id"]; exists && v != nil {
+			sessionID = fmt.Sprint(v)
+		} else {
+			sessionID = ""
+		}
 	}
-	valid, err := validateSemanticSessionViaGateway(semanticSessionID)
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", fmt.Errorf("session_id is required")
+	}
+	valid, err := validateSemanticSessionViaGateway(sessionID)
 	if err != nil {
 		return "", err
 	}
 	if !valid {
 		baseURL, tool := sessionMcpGatewayConfig()
 		return "", fmt.Errorf(
-			"invalid semantic session: please call session-mcp.upsertSemanticSession (semantic_session_id=%s gateway_url=%s validate_tool=%s)",
-			semanticSessionID,
+			"invalid session: please call session-mcp.upsertSemanticSession (session_id=%s gateway_url=%s validate_tool=%s)",
+			sessionID,
 			baseURL,
 			tool,
 		)
 	}
 	s.sessMu.Lock()
 	defer s.sessMu.Unlock()
-	if mid, ok := s.sessions[semanticSessionID]; ok {
+	if mid, ok := s.sessions[sessionID]; ok {
 		return mid, nil
 	}
 	mid := swarm.GenID("m")
-	s.sessions[semanticSessionID] = mid
+	s.sessions[sessionID] = mid
 	return mid, nil
 }
 
@@ -152,7 +161,7 @@ func sessionMcpGatewayConfig() (baseURL string, validateTool string) {
 	return baseURL, validateTool
 }
 
-func validateSemanticSessionViaGateway(semanticSessionID string) (bool, error) {
+func validateSemanticSessionViaGateway(sessionID string) (bool, error) {
 	baseURL, tool := sessionMcpGatewayConfig()
 
 	// NOTE: we use gateway direct RPC: /mcps/session-mcp
@@ -168,7 +177,7 @@ func validateSemanticSessionViaGateway(semanticSessionID string) (bool, error) {
 		"params": map[string]any{
 			"name": tool,
 			"arguments": map[string]any{
-				"semantic_session_id": semanticSessionID,
+				"semantic_session_id": sessionID,
 			},
 		},
 	}
@@ -311,11 +320,23 @@ func (s *Server) handleToolsCall(id any, params any) JSONRPCResponse {
 		args = a
 	}
 
-	tok := expectedPassportToken(s.cfg.Role)
+	tok := expectedRoleCode(s.cfg.Role)
 	if tok != "" {
-		provided, _ := args["passport_token"].(string)
-		if strings.TrimSpace(provided) != tok {
-			return NewErrorResponse(id, ErrInvalidParams, "invalid passport_token for role '"+strings.TrimSpace(s.cfg.Role)+"'", nil)
+		provided, ok := args["role_code"].(string)
+		if !ok {
+			v, exists := args["role_code"]
+			if !exists || v == nil {
+				provided = ""
+			} else {
+				provided = fmt.Sprint(v)
+			}
+		}
+		provided = strings.TrimSpace(provided)
+		if provided == "" {
+			return NewErrorResponse(id, ErrInvalidParams, "missing role_code for role '"+strings.TrimSpace(s.cfg.Role)+"'", nil)
+		}
+		if provided != tok {
+			return NewErrorResponse(id, ErrInvalidParams, "invalid role_code for role '"+strings.TrimSpace(s.cfg.Role)+"'", nil)
 		}
 	}
 
@@ -636,7 +657,15 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "extendIssueTaskLease":
-		task, err := s.issueSvc.ExtendIssueTaskLease(memberID, str(args, "issue_id"), str(args, "task_id"), intVal(args, "extend_sec"))
+		actor := memberID
+		if strings.TrimSpace(s.cfg.Role) == "worker" {
+			wid := strings.TrimSpace(str(args, "worker_id"))
+			if wid == "" {
+				return nil, fmt.Errorf("worker_id is required")
+			}
+			actor = wid
+		}
+		task, err := s.issueSvc.ExtendIssueTaskLease(actor, str(args, "issue_id"), str(args, "task_id"), intVal(args, "extend_sec"))
 		if err != nil {
 			return nil, err
 		}
@@ -1263,7 +1292,18 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return nil, s.lockSvc.Unlock(leaseID)
 	case "listLocks":
-		return s.lockSvc.ListLocks(str(args, "owner"), strSlice(args, "files"))
+		owner := strings.TrimSpace(str(args, "owner"))
+		if strings.TrimSpace(s.cfg.Role) == "worker" {
+			wid := strings.TrimSpace(str(args, "worker_id"))
+			if wid == "" {
+				return nil, fmt.Errorf("worker_id is required")
+			}
+			// Default to self to avoid leaking global lock state.
+			if owner == "" {
+				owner = wid
+			}
+		}
+		return s.lockSvc.ListLocks(owner, strSlice(args, "files"))
 	case "forceUnlock":
 		return nil, s.lockSvc.ForceUnlock(str(args, "lease_id"), str(args, "reason"))
 
