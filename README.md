@@ -188,14 +188,11 @@ Phase 2（协作注入期）
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 先查看是否有与本 issue 的主题几乎相同并尚未关闭的 issue, 如果有, 请直接先关闭它重建
 - 推荐流程：createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply
 - 未经明确要求：你必须只做 lead（拆分/答疑/验收/事件循环），不要自己下场实现需求、不要去改 worker 的目标代码文件
-- Q&A：worker 用 askIssueTask；你必须用同一个 issue_id/task_id 通过 replyIssueTaskMessage 回复
-- **工号机制**：reviewIssueTask 时需使用 getNextStepToken 并传入正确的 worker_id（工号）
-- issue 有超时关闭机制，根据 createIssue/getIssue 返回的过期时间，请在过期前5分钟使用 extendIssueLease 及时续约(可通过 swarmNow 获取当前时间)
-- **强约束** 调用 waitIssueTaskEvents 接收到事件后务必严苛审视每个细节，仔细推理分析并处理该事件，处理完后需要继续不断调用 waitIssueTaskEvents
-- **验收闭环** 当所有 tasks 完成后，你需要向验收方交付：调用 submitDelivery。
+- **强约束** 调用 waitIssueTaskEvents 接收到事件后务必严苛审视，仔细推理分析并处理该事件，严格判断该 task 实现的正确性，处理完后需要继续不断调用 waitIssueTaskEvents
+- reply/review 请务必匹配其 issue_id, task_id 及 worker_id
+- 当所有 tasks 完成后，你需要向验收方交付：调用 submitDelivery
   - submitDelivery 会挂起直到验收方给出结论（approved / rejected）
   - 若结论为 rejected，你需要仔细推理分析并修复，然后再次调用 submitDelivery，如此反复，直到通过或你明确认为结论有误则可终止该 issue
 - 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成整个协作流程直至交付, 在取得最终成功后, 调用 closeIssue 关闭该 issue
@@ -211,13 +208,11 @@ Phase 2（协作注入期）
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 领取任务：swarm-mcp-worker.waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
+- 领取任务：swarm-mcp-worker.waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前务必调用 claimIssueTask
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
-- 领取任务后务必查阅其关联的所有文档与信息，不放过任何一个文档与信息，并仔细推理分析每个细节
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
 - 开发中有任务不确定/或信息不足时请务必使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
-- task 有超时关闭机制，根据 claimIssueTask/getIssueTask 返回的过期时间，请在过期前5分钟使用 extendIssueTaskLease 及时续约(可通过 swarmNow 获取当前时间)
-- **强约束** 领取任务后务必仔细推理分析每个细节，阅读其关联的所有文档与信息，
+- **强约束** 领取任务后务必查阅其有关的所有文档与信息，并仔细推理分析每个细节，谨慎周密地完成该任务
 - **强约束** 完成任务后提交：submitIssueTask，根据返回的 next_actions 继续进行下一步
 - **强约束** 当所有 tasks 被完成后继续调用 waitIssues(status=open) 或 waitIssueTasks(status=open) 直至没有任何 open 状态的 issue
 ```
@@ -233,9 +228,7 @@ Phase 2（协作注入期）
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
 - 验收流程：swarm-mcp-acceptor.waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
-- 收到 delivery 后：
-  - 使用 delivery.issue_id 调用 getIssueAcceptanceBundle 拉取完整信息
-  - **强约束** 你必须分析整个代码库以及已知的所有文档信息，务必严苛审视每个细节，充分推理分析后，调用 reviewDelivery 将结果反馈给 lead
+- **强约束** 你必须分析整个代码库以及已知的所有文档信息，务必严苛审视及充分推理分析，严格判断该 issue 实现的正确性
 - 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成协作流程直至验收成功
 - 当验收成功后继续调用 waitDeliveries(status=open) 直至没有任何 open 状态的 issue
 ```
