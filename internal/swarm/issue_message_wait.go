@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -22,6 +23,14 @@ func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, re
 		task, err := s.loadTaskLocked(issueID, taskID)
 		if err != nil {
 			return err
+		}
+		if kind != "reply" {
+			if task.ClaimedBy == "" {
+				return fmt.Errorf("task '%s' is not claimed", taskID)
+			}
+			if strings.TrimSpace(task.ClaimedBy) != strings.TrimSpace(actor) {
+				return fmt.Errorf("task '%s' is not claimed by actor", taskID)
+			}
 		}
 
 		// State machine linkage:

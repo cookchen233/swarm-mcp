@@ -307,6 +307,12 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 		if err != nil {
 			return err
 		}
+		if strings.TrimSpace(task.ClaimedBy) == "" {
+			return fmt.Errorf("task '%s' is not claimed", taskID)
+		}
+		if strings.TrimSpace(task.ClaimedBy) != strings.TrimSpace(actor) {
+			return fmt.Errorf("task '%s' is not claimed by actor", taskID)
+		}
 		if task.Status != IssueTaskInProgress && task.Status != IssueTaskSubmitted {
 			return fmt.Errorf("task '%s' is not in progress/submitted (status: %s)", taskID, task.Status)
 		}

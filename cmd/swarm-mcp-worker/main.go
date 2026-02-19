@@ -14,6 +14,16 @@ import (
 func main() {
 	logger := log.New(os.Stderr, "swarm-mcp-worker: ", log.LstdFlags|log.LUTC)
 
+	// Load .env robustly so the binary works when started from arbitrary cwd (e.g. mcp-gateway).
+	// Priority:
+	// 1) ../.env relative to executable
+	// 2) .env in executable dir
+	// 3) .env in current working dir (default godotenv behavior)
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		_ = godotenv.Load(filepath.Clean(filepath.Join(exeDir, "..", ".env")))
+		_ = godotenv.Load(filepath.Clean(filepath.Join(exeDir, ".env")))
+	}
 	_ = godotenv.Load()
 
 	// Data root: ~/.swarm-mcp/ by default, override with SWARM_MCP_ROOT

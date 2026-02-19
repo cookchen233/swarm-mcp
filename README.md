@@ -151,10 +151,10 @@ Phase 2（协作注入期）
 ```text
 现在请你将开发清单写入一个文档， 用于后续逐一验收
 
-然后进入协作阶段：我这里有一个叫 swarm-mcp 的协作 MCP Server
+然后进入协作阶段：我这里有一个叫 swarm-mcp-lead 的协作 MCP Server
 你需要：
-1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序），拆分的任务尽可能避免并行开发冲突以适配多人协作
-2) 然后用 swarm-mcp 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
+1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序）以适配多人同时协作
+2) 然后用 swarm-mcp-lead 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
 
 [角色]
 你是 Lead。
@@ -176,15 +176,14 @@ Phase 2（协作注入期）
 ##### Worker 提示词
 
 ```text
-你当前处于 MCP 协作模式，可以调用 swarm-mcp 提供的工具来完成任务
-如果你在 MCP host 里看不到 swarm-mcp 工具：先尝试 tools/list
+你当前处于 MCP 协作模式，可以调用 swarm-mcp-worker 提供的工具来完成任务
 
 [角色]
 你是 Worker。
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 领取任务：waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
+- 领取任务：swarm-mcp-worker.waitIssues -> waitIssueTasks -> claimIssueTask，任务开始前请务必调用 claimIssueTask
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
 - 开工前先补齐上下文：尽可能获得 Issue 相关信息，优先阅读 task 的 doc_paths / required_*_docs 指向的文档（用 readIssueDoc / readTaskDoc）
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
@@ -197,15 +196,14 @@ Phase 2（协作注入期）
 ##### 验收（Acceptor）提示词
 
 ```text
-你当前处于 MCP 协作模式，可以调用 swarm-mcp 提供的工具来完成验收
-如果你在 MCP host 里看不到 swarm-mcp 工具：先尝试 tools/list
+你当前处于 MCP 协作模式，可以调用 swarm-mcp-acceptor 提供的工具来完成验收
 
 [角色]
 你是 验收（Acceptor）。
 
 [协作规则]
 - 必须先通过 session-mcp.upsertSemanticSession 拿到 session_id，后续所有工具调用都必须携带该 session_id
-- 验收流程：waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
+- 验收流程：swarm-mcp-acceptor.waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
 - 收到 delivery 后：
   - 使用 delivery.issue_id 调用 getIssueAcceptanceBundle 拉取完整信息
   - **强约束** 你必须分析整个代码库以及已知的所有文档信息，充分推理分析后，调用 reviewDelivery 将结果反馈给 lead

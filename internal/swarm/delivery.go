@@ -9,12 +9,71 @@ import (
 	"time"
 )
 
-func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, artifacts DeliveryArtifacts) (*Delivery, error) {
+func validateTestEvidence(e TestEvidence) error {
+	if _, err := trimRequired("test_evidence.script_path", e.ScriptPath); err != nil {
+		return err
+	}
+	if _, err := trimRequired("test_evidence.script_cmd", e.ScriptCmd); err != nil {
+		return err
+	}
+	if _, err := trimRequired("test_evidence.script_result", e.ScriptResult); err != nil {
+		return err
+	}
+	if _, err := trimRequired("test_evidence.doc_path", e.DocPath); err != nil {
+		return err
+	}
+	if len(e.DocCommands) == 0 {
+		return fmt.Errorf("test_evidence.doc_commands is required")
+	}
+	for i, c := range e.DocCommands {
+		if strings.TrimSpace(c) == "" {
+			return fmt.Errorf("test_evidence.doc_commands[%d] is empty", i)
+		}
+	}
+	if len(e.DocResults) != len(e.DocCommands) {
+		return fmt.Errorf("test_evidence.doc_results must align with doc_commands")
+	}
+	for i, r := range e.DocResults {
+		if strings.TrimSpace(r.Command) == "" {
+			return fmt.Errorf("test_evidence.doc_results[%d].command is required", i)
+		}
+		if strings.TrimSpace(r.Output) == "" {
+			return fmt.Errorf("test_evidence.doc_results[%d].output is required", i)
+		}
+	}
+	return nil
+}
+
+func validateVerification(v Verification, e TestEvidence) error {
+	if _, err := trimRequired("verification.script_result", v.ScriptResult); err != nil {
+		return err
+	}
+	if len(e.DocCommands) == 0 {
+		return fmt.Errorf("delivery test_evidence.doc_commands is empty")
+	}
+	if len(v.DocResults) != len(e.DocCommands) {
+		return fmt.Errorf("verification.doc_results must align with delivery test_evidence.doc_commands")
+	}
+	for i, r := range v.DocResults {
+		if strings.TrimSpace(r.Command) == "" {
+			return fmt.Errorf("verification.doc_results[%d].command is required", i)
+		}
+		if strings.TrimSpace(r.Output) == "" {
+			return fmt.Errorf("verification.doc_results[%d].output is required", i)
+		}
+	}
+	return nil
+}
+
+func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, evidence TestEvidence) (*Delivery, error) {
 	if issueID == "" {
 		return nil, fmt.Errorf("issue_id is required")
 	}
 	if actor == "" {
 		actor = "lead"
+	}
+	if err := validateTestEvidence(evidence); err != nil {
+		return nil, err
 	}
 	if _, err := trimRequired("summary", summary); err != nil {
 		return nil, err
@@ -74,6 +133,8 @@ func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, arti
 			Summary:          strings.TrimSpace(summary),
 			Refs:             strings.TrimSpace(refs),
 			Artifacts:        artifacts,
+			TestEvidence:     evidence,
+			Verification:     Verification{},
 			Status:           DeliveryOpen,
 			DeliveredBy:      actor,
 			ClaimedBy:        "",
@@ -257,7 +318,7 @@ func (s *IssueService) ExtendDeliveryLease(actor, deliveryID string, extendSec i
 	return result, nil
 }
 
-func (s *IssueService) ReviewDelivery(actor, deliveryID, verdict, feedback, refs string) (*Delivery, error) {
+func (s *IssueService) ReviewDelivery(actor, deliveryID, verdict, feedback, refs string, verification Verification) (*Delivery, error) {
 	if deliveryID == "" {
 		return nil, fmt.Errorf("delivery_id is required")
 	}
@@ -285,6 +346,10 @@ func (s *IssueService) ReviewDelivery(actor, deliveryID, verdict, feedback, refs
 		if d.ClaimedBy != actor {
 			return fmt.Errorf("delivery '%s' is not claimed by actor", deliveryID)
 		}
+		if err := validateVerification(verification, d.TestEvidence); err != nil {
+			return err
+		}
+		d.Verification = verification
 		d.Status = verdict
 		d.ReviewedBy = actor
 		d.ReviewedAt = NowStr()
@@ -378,9 +443,9 @@ func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (
 	}
 }
 
-func (s *IssueService) SubmitDelivery(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, timeoutSec int) (map[string]any, error) {
+func (s *IssueService) SubmitDelivery(actor, issueID, summary, refs string, artifacts DeliveryArtifacts, evidence TestEvidence, timeoutSec int) (map[string]any, error) {
 	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
-	d, err := s.CreateDelivery(actor, issueID, summary, refs, artifacts)
+	d, err := s.CreateDelivery(actor, issueID, summary, refs, artifacts, evidence)
 	if err != nil {
 		return nil, err
 	}

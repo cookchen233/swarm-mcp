@@ -61,6 +61,7 @@ const (
 	EventIssueTaskReviewed  = "issue_task_reviewed"
 	EventIssueTaskResolved  = "issue_task_resolved"
 	EventIssueTaskMessage   = "issue_task_message"
+	EventIssueTaskReset     = "issue_task_reset"
 )
 
 // Delivery statuses
@@ -147,12 +148,41 @@ type DeliveryArtifacts struct {
 	KnownRisks   string   `json:"known_risks"`
 }
 
+type CommandResult struct {
+	Command  string `json:"command"`
+	Passed   bool   `json:"passed"`
+	ExitCode int    `json:"exit_code"`
+	Output   string `json:"output"`
+}
+
+type TestEvidence struct {
+	ScriptPath   string `json:"script_path"`
+	ScriptCmd    string `json:"script_cmd"`
+	ScriptPassed bool   `json:"script_passed"`
+	ScriptResult string `json:"script_result"`
+
+	DocPath     string          `json:"doc_path"`
+	DocCommands []string        `json:"doc_commands"`
+	DocResults  []CommandResult `json:"doc_results"`
+	DocPassed   bool            `json:"doc_passed"`
+}
+
+type Verification struct {
+	ScriptPassed bool   `json:"script_passed"`
+	ScriptResult string `json:"script_result"`
+
+	DocPassed  bool            `json:"doc_passed"`
+	DocResults []CommandResult `json:"doc_results"`
+}
+
 type Delivery struct {
 	ID               string            `json:"id"`
 	IssueID          string            `json:"issue_id"`
 	Summary          string            `json:"summary"`
 	Refs             string            `json:"refs"`
 	Artifacts        DeliveryArtifacts `json:"artifacts"`
+	TestEvidence     TestEvidence      `json:"test_evidence"`
+	Verification     Verification      `json:"verification"`
 	Status           string            `json:"status"`
 	DeliveredBy      string            `json:"delivered_by"`
 	ClaimedBy        string            `json:"claimed_by"`

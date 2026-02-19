@@ -311,6 +311,14 @@ func (s *Server) handleToolsCall(id any, params any) JSONRPCResponse {
 		args = a
 	}
 
+	tok := expectedPassportToken(s.cfg.Role)
+	if tok != "" {
+		provided, _ := args["passport_token"].(string)
+		if strings.TrimSpace(provided) != tok {
+			return NewErrorResponse(id, ErrInvalidParams, "invalid passport_token for role '"+strings.TrimSpace(s.cfg.Role)+"'", nil)
+		}
+	}
+
 	result, err := s.dispatch(name, args)
 	if err != nil {
 		return NewResultResponse(id, map[string]any{
@@ -659,6 +667,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "submitDelivery":
 		art := objMap(args, "artifacts")
+		e := objMap(args, "test_evidence")
 		out, err := s.issueSvc.SubmitDelivery(
 			memberID,
 			str(args, "issue_id"),
@@ -671,6 +680,16 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 				ReviewedRefs: strSlice(art, "reviewed_refs"),
 				TestOutput:   str(art, "test_output"),
 				KnownRisks:   str(art, "known_risks"),
+			},
+			swarm.TestEvidence{
+				ScriptPath:   str(e, "script_path"),
+				ScriptCmd:    str(e, "script_cmd"),
+				ScriptPassed: boolVal(e, "script_passed"),
+				ScriptResult: str(e, "script_result"),
+				DocPath:      str(e, "doc_path"),
+				DocCommands:  strSlice(e, "doc_commands"),
+				DocResults:   commandResultSlice(e, "doc_results"),
+				DocPassed:    boolVal(e, "doc_passed"),
 			},
 			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
 		)
@@ -699,7 +718,20 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "reviewDelivery":
-		d, err := s.issueSvc.ReviewDelivery(memberID, str(args, "delivery_id"), str(args, "verdict"), str(args, "feedback"), str(args, "refs"))
+		v := objMap(args, "verification")
+		d, err := s.issueSvc.ReviewDelivery(
+			memberID,
+			str(args, "delivery_id"),
+			str(args, "verdict"),
+			str(args, "feedback"),
+			str(args, "refs"),
+			swarm.Verification{
+				ScriptPassed: boolVal(v, "script_passed"),
+				ScriptResult: str(v, "script_result"),
+				DocPassed:    boolVal(v, "doc_passed"),
+				DocResults:   commandResultSlice(v, "doc_results"),
+			},
+		)
 		if err != nil {
 			return nil, err
 		}
@@ -918,8 +950,12 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "claimIssueTask":
-		_, _ = s.workerSvc.Register(memberID)
-		task, err := s.issueSvc.ClaimTask(str(args, "issue_id"), str(args, "task_id"), memberID, str(args, "next_step_token"))
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
+		_, _ = s.workerSvc.Register(wid)
+		task, err := s.issueSvc.ClaimTask(str(args, "issue_id"), str(args, "task_id"), wid, str(args, "next_step_token"))
 		if err != nil {
 			return nil, err
 		}
@@ -930,10 +966,14 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "submitIssueTask":
 		art := objMap(args, "artifacts")
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
 		task, err := s.issueSvc.SubmitTask(
 			str(args, "issue_id"),
 			str(args, "task_id"),
-			memberID,
+			wid,
 			swarm.SubmissionArtifacts{
 				Summary:      str(art, "summary"),
 				ChangedFiles: strSlice(art, "changed_files"),
@@ -993,6 +1033,16 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			feedbackDetails,
 			str(args, "next_step_token"),
 		)
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(task)
+		if err != nil {
+			return nil, err
+		}
+		return addLeaseExpiresAt(addNow(m)), nil
+	case "resetIssueTask":
+		task, err := s.issueSvc.ResetTask(memberID, str(args, "issue_id"), str(args, "task_id"), str(args, "reason"))
 		if err != nil {
 			return nil, err
 		}
@@ -1094,20 +1144,28 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return map[string]any{"events": events, "next_seq": nextSeq}, nil
 	case "askIssueTask":
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
 		return s.issueSvc.AskIssueTask(
 			str(args, "issue_id"),
 			str(args, "task_id"),
-			memberID,
+			wid,
 			str(args, "kind"),
 			str(args, "content"),
 			str(args, "refs"),
 			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
 		)
 	case "postIssueTaskMessage":
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
 		return s.issueSvc.PostTaskMessage(
 			str(args, "issue_id"),
 			str(args, "task_id"),
-			memberID,
+			wid,
 			str(args, "kind"),
 			str(args, "content"),
 			str(args, "refs"),
@@ -1151,14 +1209,59 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 
 	// Lock
 	case "lockFiles":
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
+		issueID := strings.TrimSpace(str(args, "issue_id"))
+		taskID := strings.TrimSpace(str(args, "task_id"))
+		if taskID != "" {
+			if issueID == "" {
+				return nil, fmt.Errorf("issue_id is required when task_id is provided")
+			}
+			task, err := s.issueSvc.GetTask(issueID, taskID)
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(task.ClaimedBy) != wid {
+				return nil, fmt.Errorf("task '%s' is not claimed by worker_id", taskID)
+			}
+		}
 		return s.lockSvc.LockFiles(
-			str(args, "task_id"), strOr(args, "owner", memberID),
-			strSlice(args, "files"), intVal(args, "ttl_sec"), intVal(args, "wait_sec"),
+			taskID,
+			wid,
+			strSlice(args, "files"),
+			intVal(args, "ttl_sec"),
+			intVal(args, "wait_sec"),
 		)
 	case "heartbeat":
-		return s.lockSvc.Heartbeat(str(args, "lease_id"), intVal(args, "extend_sec"))
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
+		leaseID := strings.TrimSpace(str(args, "lease_id"))
+		lease, err := s.lockSvc.GetLease(leaseID)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(lease.Owner) != wid {
+			return nil, fmt.Errorf("lease '%s' is not owned by worker_id", leaseID)
+		}
+		return s.lockSvc.Heartbeat(leaseID, intVal(args, "extend_sec"))
 	case "unlock":
-		return nil, s.lockSvc.Unlock(str(args, "lease_id"))
+		wid := strings.TrimSpace(str(args, "worker_id"))
+		if wid == "" {
+			return nil, fmt.Errorf("worker_id is required")
+		}
+		leaseID := strings.TrimSpace(str(args, "lease_id"))
+		lease, err := s.lockSvc.GetLease(leaseID)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(lease.Owner) != wid {
+			return nil, fmt.Errorf("lease '%s' is not owned by worker_id", leaseID)
+		}
+		return nil, s.lockSvc.Unlock(leaseID)
 	case "listLocks":
 		return s.lockSvc.ListLocks(str(args, "owner"), strSlice(args, "files"))
 	case "forceUnlock":
@@ -1194,6 +1297,32 @@ func strSlice(args map[string]any, key string) []string {
 		}
 	}
 	return result
+}
+
+func boolVal(args map[string]any, key string) bool {
+	v, _ := args[key].(bool)
+	return v
+}
+
+func commandResultSlice(args map[string]any, key string) []swarm.CommandResult {
+	raw, ok := args[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]swarm.CommandResult, 0, len(raw))
+	for _, it := range raw {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, swarm.CommandResult{
+			Command:  str(m, "command"),
+			Passed:   boolVal(m, "passed"),
+			ExitCode: intVal(m, "exit_code"),
+			Output:   str(m, "output"),
+		})
+	}
+	return out
 }
 
 func mapSlice(args map[string]any, key string) []map[string]any {

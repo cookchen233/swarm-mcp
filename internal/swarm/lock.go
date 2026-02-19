@@ -242,6 +242,18 @@ func (s *LockService) Heartbeat(leaseID string, extendSec int) (*Lease, error) {
 	return result, err
 }
 
+func (s *LockService) GetLease(leaseID string) (*Lease, error) {
+	if leaseID == "" {
+		return nil, fmt.Errorf("lease_id is required")
+	}
+	leasePath := s.store.Path("locks", "leases", leaseID+".json")
+	var lease Lease
+	if err := s.store.ReadJSON(leasePath, &lease); err != nil {
+		return nil, fmt.Errorf("lease '%s' not found", leaseID)
+	}
+	return &lease, nil
+}
+
 // Unlock releases a lease and all its file locks.
 func (s *LockService) Unlock(leaseID string) error {
 	if leaseID == "" {
