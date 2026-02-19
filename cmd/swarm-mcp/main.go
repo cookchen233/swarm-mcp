@@ -62,13 +62,13 @@ func main() {
 		}
 	}
 
-	issueTTLSec := 3600
+	issueTTLSec := 7200
 	if v := os.Getenv("SWARM_MCP_ISSUE_TTL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			issueTTLSec = n
 		}
 	}
-	taskTTLSec := 600
+	taskTTLSec := 3600
 	if v := os.Getenv("SWARM_MCP_TASK_TTL_SEC"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			taskTTLSec = n

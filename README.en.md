@@ -403,8 +403,8 @@ See “MCP Client Configuration” above. Recommended settings:
 - `SWARM_MCP_ROOT=~/.swarm-mcp/<project_key>` (isolate per project)
 - `SWARM_MCP_SUGGESTED_MIN_TASK_COUNT`: suggested minimum task count
 - `SWARM_MCP_MAX_TASK_COUNT`: maximum tasks allowed per issue (enforced at `createIssueTask`; rejects when exceeded)
-- `SWARM_MCP_ISSUE_TTL_SEC=3600`: issue lease TTL (auto-canceled as `canceled` when expired)
-- `SWARM_MCP_TASK_TTL_SEC=600`: task lease TTL (auto-reopened to `open` from `in_progress/blocked/submitted` when expired)
+- `SWARM_MCP_ISSUE_TTL_SEC=7200`: issue lease TTL (auto-canceled as `canceled` when expired)
+- `SWARM_MCP_TASK_TTL_SEC=3600`: task lease TTL (auto-reopened to `open` from `in_progress/blocked/submitted` when expired)
 
 Restart your MCP host/client and ensure swarm-mcp tools show up.
 
