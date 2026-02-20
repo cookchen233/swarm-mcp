@@ -12,7 +12,7 @@ func TestCreateDelivery_RequiresTestEvidence(t *testing.T) {
 	store.EnsureDir("deliveries")
 
 	trace := NewTraceService(store)
-	svc := NewIssueService(store, trace, 7200, 3600, 3600)
+	svc := NewIssueService(store, trace, 7200, 3600, 3600, 3600)
 
 	issueID := "issue-1"
 	store.EnsureDir("issues", issueID)
@@ -46,7 +46,7 @@ func TestReviewDelivery_RequiresVerificationAlignedWithEvidence(t *testing.T) {
 	store.EnsureDir("deliveries")
 
 	trace := NewTraceService(store)
-	svc := NewIssueService(store, trace, 7200, 3600, 3600)
+	svc := NewIssueService(store, trace, 7200, 3600, 3600, 3600)
 
 	issueID := "issue-1"
 	store.EnsureDir("issues", issueID)

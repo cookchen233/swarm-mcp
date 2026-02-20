@@ -85,6 +85,16 @@ func main() {
 		defaultTimeoutSec = 3600
 	}
 
+	minTimeoutSec := defaultTimeoutSec
+	if v := os.Getenv("SWARM_MCP_MIN_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			minTimeoutSec = n
+		}
+	}
+	if minTimeoutSec < 1 {
+		minTimeoutSec = 1
+	}
+
 	role := os.Getenv("SWARM_MCP_ROLE")
 	if role == "" {
 		logger.Printf("WARNING: SWARM_MCP_ROLE not set; running in full-access debug mode (all tools exposed). Set SWARM_MCP_ROLE=lead|worker|acceptor for role-scoped access.")
@@ -100,6 +110,7 @@ func main() {
 		IssueTTLSec:           issueTTLSec,
 		TaskTTLSec:            taskTTLSec,
 		DefaultTimeoutSec:     defaultTimeoutSec,
+		MinTimeoutSec:         minTimeoutSec,
 	}, store, trace)
 
 	if err := srv.Run(); err != nil {

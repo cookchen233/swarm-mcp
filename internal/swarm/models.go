@@ -391,6 +391,7 @@ type IssueService struct {
 	issueTTLSec       int
 	taskTTLSec        int
 	defaultTimeoutSec int
+	minTimeoutSec     int
 
 	mu       sync.Mutex
 	cond     *sync.Cond

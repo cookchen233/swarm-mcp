@@ -1,0 +1,4 @@
+Next: interpret the lead review result included in this response.
+If approved: follow the lead's next-step instructions (if any) or finish/stand by for further work.
+If rejected: follow feedback, adjust code/tests, and submitIssueTask again.
+If you need clarification: askIssueTask.

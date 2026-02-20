@@ -1,0 +1,2 @@
+Next: return to the lead inbox loop and wait for the next worker signal (nextIssueSignal / selectIssueInbox / stepLeadInbox).
+If you expect a follow-up submission, keep waiting; do not proactively mutate tasks.

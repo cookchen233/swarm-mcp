@@ -85,6 +85,16 @@ func main() {
 		defaultTimeoutSec = 3600
 	}
 
+	minTimeoutSec := defaultTimeoutSec
+	if v := os.Getenv("SWARM_MCP_MIN_TIMEOUT_SEC"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			minTimeoutSec = n
+		}
+	}
+	if minTimeoutSec < 1 {
+		minTimeoutSec = 1
+	}
+
 	srv := mcp.NewServer(mcp.ServerConfig{
 		Name:                  "swarm-mcp-lead",
 		Version:               "0.1.0",
@@ -95,6 +105,7 @@ func main() {
 		IssueTTLSec:           issueTTLSec,
 		TaskTTLSec:            taskTTLSec,
 		DefaultTimeoutSec:     defaultTimeoutSec,
+		MinTimeoutSec:         minTimeoutSec,
 	}, store, trace)
 
 	if err := srv.Run(); err != nil {

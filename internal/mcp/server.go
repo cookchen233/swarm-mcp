@@ -28,6 +28,7 @@ type ServerConfig struct {
 	IssueTTLSec           int
 	TaskTTLSec            int
 	DefaultTimeoutSec     int
+	MinTimeoutSec         int
 }
 
 type Server struct {
@@ -50,6 +51,9 @@ func NewServer(cfg ServerConfig, store *swarm.Store, trace *swarm.TraceService) 
 	if cfg.Logger == nil {
 		cfg.Logger = log.New(os.Stderr, "swarm-mcp: ", log.LstdFlags|log.LUTC)
 	}
+	if cfg.MinTimeoutSec <= 0 {
+		cfg.MinTimeoutSec = cfg.DefaultTimeoutSec
+	}
 	return &Server{
 		cfg:       cfg,
 		in:        os.Stdin,
@@ -58,38 +62,33 @@ func NewServer(cfg ServerConfig, store *swarm.Store, trace *swarm.TraceService) 
 		docsSvc:   swarm.NewDocsService(store),
 		workerSvc: swarm.NewWorkerService(store, trace),
 		lockSvc:   swarm.NewLockService(store, trace),
-		issueSvc:  swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec, cfg.DefaultTimeoutSec),
+		issueSvc:  swarm.NewIssueService(store, trace, cfg.IssueTTLSec, cfg.TaskTTLSec, cfg.DefaultTimeoutSec, cfg.MinTimeoutSec),
 	}
 }
 
-// getNextActionText reads the next action guidance text from config file.
-// Returns a default message if file doesn't exist or can't be read.
-func (s *Server) getNextActionText() string {
-	configPath := "config/next_action.txt"
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// Return default text if file doesn't exist
-		return "All tasks completed. Please proceed with delivery and testing."
+func (s *Server) getNextActions(key string, fallback []string) []string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return fallback
 	}
-
-	file, err := os.Open(configPath)
+	path := "config/next_actions/" + key + ".txt"
+	bs, err := os.ReadFile(path)
 	if err != nil {
-		s.cfg.Logger.Printf("Warning: failed to open next_action config file: %v", err)
-		return "All tasks completed. Please proceed with delivery and testing."
+		return fallback
 	}
-	defer file.Close()
-
-	content, err := io.ReadAll(file)
-	if err != nil {
-		s.cfg.Logger.Printf("Warning: failed to read next_action config file: %v", err)
-		return "All tasks completed. Please proceed with delivery and testing."
+	lines := strings.Split(string(bs), "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" {
+			continue
+		}
+		out = append(out, ln)
 	}
-
-	text := strings.TrimSpace(string(content))
-	if text == "" {
-		return "All tasks completed. Please proceed with delivery and testing."
+	if len(out) == 0 {
+		return fallback
 	}
-
-	return text
+	return out
 }
 
 func (s *Server) Run() error {
@@ -635,7 +634,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if strings.TrimSpace(status) == "" {
 			status = swarm.IssueOpen
 		}
-		issues, err := s.issueSvc.WaitIssues(status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
+		issues, err := s.issueSvc.WaitIssues(status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.MinTimeoutSec, s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
 		if err != nil {
 			return nil, err
 		}
@@ -653,7 +652,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if strings.TrimSpace(status) == "" {
 			status = swarm.IssueTaskOpen
 		}
-		tasks, err := s.issueSvc.WaitIssueTasks(str(args, "issue_id"), status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
+		tasks, err := s.issueSvc.WaitIssueTasks(str(args, "issue_id"), status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.MinTimeoutSec, s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
 		if err != nil {
 			return nil, err
 		}
@@ -665,7 +664,13 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			}
 			out = append(out, addLeaseExpiresAt(addNow(m)))
 		}
-		return map[string]any{"tasks": out, "count": len(tasks), "server_now_ms": nowMs, "server_now": nowStr}, nil
+		resp := map[string]any{"tasks": out, "count": len(tasks), "server_now_ms": nowMs, "server_now": nowStr}
+		if len(tasks) == 0 {
+			resp["next_actions"] = s.getNextActions("worker_after_wait_issue_tasks_empty", []string{"Next: keep waiting for available tasks (waitIssueTasks)."})
+		} else {
+			resp["next_actions"] = s.getNextActions("worker_after_wait_issue_tasks_has_tasks", []string{"Next: claim an open task (claimIssueTask)."})
+		}
+		return resp, nil
 	case "getIssue":
 		issue, err := s.issueSvc.GetIssue(str(args, "issue_id"))
 		if err != nil {
@@ -750,36 +755,36 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 				DocResults:   commandResultSlice(e, "doc_results"),
 				DocPassed:    boolVal(e, "doc_passed"),
 			},
-			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
+			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.MinTimeoutSec, s.cfg.DefaultTimeoutSec),
 		)
 		if err != nil {
 			return nil, err
 		}
 		return addNow(out), nil
 	case "claimDelivery":
-		d, err := s.issueSvc.ClaimDelivery(memberID, str(args, "delivery_id"), intVal(args, "extend_sec"))
+		d, err := s.issueSvc.ClaimDelivery("acceptor", str(args, "delivery_id"), intVal(args, "extend_sec"))
 		if err != nil {
 			return nil, err
 		}
-		m, err := toMap(d)
+		out, err := toMap(d)
 		if err != nil {
 			return nil, err
 		}
-		return addLeaseExpiresAt(addNow(m)), nil
+		return addNow(out), nil
 	case "extendDeliveryLease":
-		d, err := s.issueSvc.ExtendDeliveryLease(memberID, str(args, "delivery_id"), intVal(args, "extend_sec"))
+		d, err := s.issueSvc.ExtendDeliveryLease("acceptor", str(args, "delivery_id"), intVal(args, "extend_sec"))
 		if err != nil {
 			return nil, err
 		}
-		m, err := toMap(d)
+		out, err := toMap(d)
 		if err != nil {
 			return nil, err
 		}
-		return addLeaseExpiresAt(addNow(m)), nil
+		return addNow(out), nil
 	case "reviewDelivery":
 		v := objMap(args, "verification")
 		d, err := s.issueSvc.ReviewDelivery(
-			memberID,
+			"acceptor",
 			str(args, "delivery_id"),
 			str(args, "verdict"),
 			str(args, "feedback"),
@@ -798,6 +803,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		m["next_actions"] = s.getNextActions("acceptor_after_review", []string{"Next: wait for next delivery (waitDeliveries)."})
 		return addNow(m), nil
 	case "getDelivery":
 		d, err := s.issueSvc.GetDelivery(str(args, "delivery_id"))
@@ -866,7 +872,8 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if strings.TrimSpace(status) == "" {
 			status = swarm.DeliveryOpen
 		}
-		ds, err := s.issueSvc.WaitDeliveries(status, timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec), intVal(args, "limit"))
+		timeoutSec := timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.MinTimeoutSec, s.cfg.DefaultTimeoutSec)
+		ds, err := s.issueSvc.WaitDeliveries(status, timeoutSec, intVal(args, "limit"))
 		if err != nil {
 			return nil, err
 		}
@@ -876,9 +883,15 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, addLeaseExpiresAt(addNow(m)))
+			out = append(out, addNow(m))
 		}
-		return map[string]any{"deliveries": out, "count": len(ds), "server_now_ms": nowMs, "server_now": nowStr}, nil
+		resp := map[string]any{"deliveries": out, "count": len(ds), "server_now_ms": nowMs, "server_now": nowStr}
+		if len(ds) == 0 {
+			resp["next_actions"] = s.getNextActions("acceptor_after_wait_empty", []string{"Next: keep waiting for new deliveries."})
+		} else {
+			resp["next_actions"] = s.getNextActions("acceptor_after_wait_has_delivery", []string{"Next: review the claimed delivery (reviewDelivery)."})
+		}
+		return resp, nil
 	case "getIssueAcceptanceBundle":
 		issueID := str(args, "issue_id")
 		issue, err := s.issueSvc.GetIssue(issueID)
@@ -1022,6 +1035,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		m["next_actions"] = s.getNextActions("worker_after_claim", []string{"Next: implement the task, run tests, then submitIssueTask."})
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "submitIssueTask":
 		art := objMap(args, "artifacts")
@@ -1050,19 +1064,12 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		actions := make([]map[string]any, 0, 1)
-		if task.NextStepToken != "" {
-			if tok, err := s.issueSvc.ReadNextStepToken(task.IssueID, task.NextStepToken); err == nil {
-				if tok.NextStep.Type == "claim_task" && tok.NextStep.TaskID != "" {
-					actions = append(actions, map[string]any{
-						"tool": "claimIssueTask",
-						"args": map[string]any{"issue_id": task.IssueID, "task_id": tok.NextStep.TaskID, "next_step_token": task.NextStepToken},
-						"note": "Claim the reserved next-step task.",
-					})
-				}
-			}
+		if task.Status == swarm.IssueTaskDone {
+			m["next_actions"] = s.getNextActions("worker_after_submit", []string{
+				"Next: interpret the lead review result included in this response.",
+				"If approved: follow the lead's next-step instructions (if any) or finish/stand by for further work.",
+			})
 		}
-		m["next_actions"] = actions
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "reviewIssueTask":
 		art := objMap(args, "artifacts")
@@ -1102,6 +1109,13 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			return nil, err
 		}
 		if verdict == swarm.VerdictApproved {
+			m["next_actions"] = s.getNextActions("lead_after_review_approved", []string{"Next: wait for next worker signal (use nextIssueSignal/selectIssueInbox)."})
+		} else if verdict == swarm.VerdictRejected {
+			m["next_actions"] = s.getNextActions("lead_after_review_rejected", []string{"Next: wait for worker follow-up (question or resubmission)."})
+		} else {
+			m["next_actions"] = s.getNextActions("lead_after_review", []string{"Next: wait for next worker signal (use nextIssueSignal/selectIssueInbox)."})
+		}
+		if verdict == swarm.VerdictApproved {
 			tasks, err := s.issueSvc.ListTasks(task.IssueID, "")
 			if err == nil {
 				allDone := len(tasks) > 0
@@ -1112,7 +1126,11 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 					}
 				}
 				if allDone {
-					m["next_action"] = s.getNextActionText()
+					m["next_actions"] = s.getNextActions("lead_after_review_all_done", []string{
+						"Next: start backend/frontend (if applicable) and run full manual/API/UI tests for this issue.",
+						"Then: produce ./ai-issue-doc/test-issue-xxx.sh and ./ai-issue-doc/test-issue-xxx.md and run them to success.",
+						"Finally: submitDelivery; if rejected, fix and resubmit; when approved, closeIssue.",
+					})
 				}
 			}
 		}
@@ -1226,21 +1244,39 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if len(events) > 1 {
 			events = events[:1]
 		}
-		return map[string]any{"events": events, "next_seq": nextSeq}, nil
+		out := map[string]any{"events": events, "next_seq": nextSeq}
+		if len(events) == 0 {
+			out["next_actions"] = s.getNextActions("lead_after_wait_empty", []string{"Next: keep waiting for next worker signal (use nextIssueSignal/selectIssueInbox)."})
+			return out, nil
+		}
+		evType := events[0].Type
+		switch evType {
+		case swarm.EventIssueTaskMessage:
+			out["next_actions"] = s.getNextActions("lead_after_wait_message", []string{"Next: replyIssueTaskMessage, then wait for next signal."})
+		case swarm.EventSubmissionCreated:
+			out["next_actions"] = s.getNextActions("lead_after_wait_submission", []string{"Next: reviewIssueTask, then wait for next signal."})
+		default:
+			out["next_actions"] = s.getNextActions("lead_after_wait_other", []string{"Next: handle this signal, then wait for next signal."})
+		}
+		return out, nil
 	case "askIssueTask":
 		wid := strings.TrimSpace(str(args, "worker_id"))
 		if wid == "" {
 			return nil, fmt.Errorf("worker_id is required")
 		}
-		return s.issueSvc.AskIssueTask(
+		resp, err := s.issueSvc.AskIssueTask(
 			str(args, "issue_id"),
 			str(args, "task_id"),
 			wid,
 			str(args, "kind"),
 			str(args, "content"),
 			str(args, "refs"),
-			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.DefaultTimeoutSec),
+			timeoutWithMin(intVal(args, "timeout_sec"), s.cfg.MinTimeoutSec, s.cfg.DefaultTimeoutSec),
 		)
+		if err != nil {
+			return nil, err
+		}
+		return resp, nil
 	case "postIssueTaskMessage":
 		wid := strings.TrimSpace(str(args, "worker_id"))
 		if wid == "" {
@@ -1255,7 +1291,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			str(args, "refs"),
 		)
 	case "replyIssueTaskMessage":
-		return s.issueSvc.ReplyTaskMessage(
+		ev, err := s.issueSvc.ReplyTaskMessage(
 			str(args, "issue_id"),
 			str(args, "task_id"),
 			memberID,
@@ -1263,6 +1299,15 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 			str(args, "content"),
 			str(args, "refs"),
 		)
+		if err != nil {
+			return nil, err
+		}
+		m, err := toMap(ev)
+		if err != nil {
+			return nil, err
+		}
+		m["next_actions"] = s.getNextActions("lead_after_reply", []string{"Next: wait for next worker signal (use nextIssueSignal/selectIssueInbox)."})
+		return addNow(m), nil
 
 	// === Workers ===
 	case "registerWorker":
@@ -1461,10 +1506,15 @@ func int64Val(args map[string]any, key string) int64 {
 	}
 }
 
-// timeoutWithMin enforces a minimum timeout of 3600s (1 hour)
-func timeoutWithMin(timeoutSec int, minTimeoutSec int) int {
+func timeoutWithMin(timeoutSec int, minTimeoutSec int, defaultTimeoutSec int) int {
+	if defaultTimeoutSec <= 0 {
+		defaultTimeoutSec = 3600
+	}
+	if minTimeoutSec <= 0 {
+		minTimeoutSec = defaultTimeoutSec
+	}
 	if timeoutSec <= 0 {
-		return minTimeoutSec
+		return defaultTimeoutSec
 	}
 	if timeoutSec < minTimeoutSec {
 		return minTimeoutSec

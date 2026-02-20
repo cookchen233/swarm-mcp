@@ -1,0 +1,2 @@
+Next: claim exactly one open task (claimIssueTask) and start working.
+After claim: lock files before editing; implement; test; then submitIssueTask.

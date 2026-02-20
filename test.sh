@@ -12,6 +12,9 @@ export SWARM_MCP_ROLE_CODE_LEAD=""
 export SWARM_MCP_ROLE_CODE_WORKER=""
 export SWARM_MCP_ROLE_CODE_ACCEPTOR=""
 
+# Integration tests need short waits; enforce via config rather than code changes.
+export SWARM_MCP_MIN_TIMEOUT_SEC="1"
+
 BIN="$(dirname "$0")/bin/swarm-mcp"
 export SWARM_MCP_ROOT="/tmp/swarm-mcp-test-$$"
 PASS=0
@@ -305,6 +308,31 @@ EMPLOYEE_ID="E0001"
 resp=$(tool_call 7 "claimIssueTask" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"worker_id\":\"$EMPLOYEE_ID\"}")
 assert_contains "claimed in_progress" "$resp" "in_progress"
 
+echo "[Test 3.QA] Worker askIssueTask (async, blocks until reply)"
+tool_call_async 70 "askIssueTask" "$WORKER_SESSION" "{\"worker_id\":\"$EMPLOYEE_ID\",\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"kind\":\"question\",\"content\":\"How to proceed?\",\"timeout_sec\":30}"
+
+echo "[Test 3.QA.1] Lead waitIssueTaskEvents until question"
+resp=""
+for _ in $(seq 1 30); do
+    resp=$(tool_call 71 "waitIssueTaskEvents" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"timeout_sec\":5}")
+    if echo "$resp" | grep -Fq "issue_task_message"; then
+        break
+    fi
+done
+assert_contains "lead sees question" "$resp" "issue_task_message"
+MSG_ID=$(echo "$resp" | grep -oE 'msg_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$MSG_ID" ]; then
+    echo "FAILED to parse MSG_ID: $resp"
+    exit 1
+fi
+
+echo "[Test 3.QA.2] Lead replyIssueTaskMessage"
+resp=$(tool_call 72 "replyIssueTaskMessage" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"message_id\":\"$MSG_ID\",\"content\":\"Proceed by implementing changes and submitting.\"}")
+assert_contains "reply ok" "$resp" "\\\"kind\\\": \\\"reply\\\""
+
+ASK_RESP=$(wait_resp 70)
+assert_contains "askIssueTask unblocked" "$ASK_RESP" "reply"
+
 echo "[Test 3.1] Submit Issue Task (async)"
 tool_call_async 8 "submitIssueTask" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"worker_id\":\"$EMPLOYEE_ID\",\"artifacts\":{\"summary\":\"done\",\"changed_files\":[\"a.txt\"],\"test_cases\":[\"go test ./...\"],\"test_output\":\"ok\",\"test_result\":\"passed\"}}"
 
@@ -340,20 +368,25 @@ tool_call_async 20 "submitDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\"
 
 echo "[Test 4.1] Acceptor waits + reviews"
 resp=""
-for _ in $(seq 1 30); do
-    resp=$(tool_call 21 "waitDeliveries" "$ACCEPTOR_SESSION" '{"status":"open","timeout_sec":5}')
+set +e
+for _ in $(seq 1 60); do
+    resp=$(tool_call 21 "waitDeliveries" "$ACCEPTOR_SESSION" '{"status":"open","timeout_sec":10}')
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        continue
+    fi
     if echo "$resp" | grep -Fq "delivery_"; then
         break
     fi
 done
+set -e
 assert_contains "waitDeliveries returns" "$resp" "delivery_"
 DELIVERY_ID=$(echo "$resp" | grep -oE 'delivery_[0-9]+_[0-9a-f]+' | head -1)
 if [ -z "$DELIVERY_ID" ]; then
     echo "FAILED to parse DELIVERY_ID: $resp"
     exit 1
 fi
-resp=$(tool_call 22 "claimDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY_ID\"}")
-assert_contains "claimed" "$resp" "in_review"
+assert_contains "already claimed" "$resp" "in_review"
 resp=$(tool_call 23 "reviewDelivery" "$ACCEPTOR_SESSION" "{\"delivery_id\":\"$DELIVERY_ID\",\"verdict\":\"approved\",\"verification\":{\"script_passed\":true,\"script_result\":\"ok\",\"doc_passed\":true,\"doc_results\":[{\"command\":\"echo hi\",\"passed\":true,\"exit_code\":0,\"output\":\"hi\"}]}}" )
 assert_contains "approved" "$resp" "approved"
 

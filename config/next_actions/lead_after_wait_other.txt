@@ -1,0 +1,2 @@
+Next: handle the returned event type appropriately, then continue waiting for the next signal.
+Prefer staying in the inbox loop (wait -> act -> wait) to avoid drifting.

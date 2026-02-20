@@ -9,8 +9,11 @@ import (
 	"time"
 )
 
-func NewIssueService(store *Store, trace *TraceService, issueTTLSec, taskTTLSec, defaultTimeoutSec int) *IssueService {
-	s := &IssueService{store: store, trace: trace, versions: map[string]int64{}, issueTTLSec: issueTTLSec, taskTTLSec: taskTTLSec, defaultTimeoutSec: defaultTimeoutSec}
+func NewIssueService(store *Store, trace *TraceService, issueTTLSec, taskTTLSec, defaultTimeoutSec, minTimeoutSec int) *IssueService {
+	if minTimeoutSec <= 0 {
+		minTimeoutSec = defaultTimeoutSec
+	}
+	s := &IssueService{store: store, trace: trace, versions: map[string]int64{}, issueTTLSec: issueTTLSec, taskTTLSec: taskTTLSec, defaultTimeoutSec: defaultTimeoutSec, minTimeoutSec: minTimeoutSec}
 	s.cond = sync.NewCond(&s.mu)
 	return s
 }
@@ -66,8 +69,8 @@ func (s *IssueService) normalizeTimeoutSec(timeoutSec int) int {
 	if timeoutSec <= 0 {
 		return s.defaultTimeoutSec
 	}
-	if timeoutSec < s.defaultTimeoutSec {
-		return s.defaultTimeoutSec
+	if s.minTimeoutSec > 0 && timeoutSec < s.minTimeoutSec {
+		return s.minTimeoutSec
 	}
 	return timeoutSec
 }

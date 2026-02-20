@@ -15,7 +15,7 @@ func TestResetTask_ClearsAllProgressAndCleansLocksAndDocs(t *testing.T) {
 	store.EnsureDir("locks", "leases")
 
 	trace := NewTraceService(store)
-	svc := NewIssueService(store, trace, 7200, 3600, 3600)
+	svc := NewIssueService(store, trace, 7200, 3600, 3600, 3600)
 
 	issueID := "issue-1"
 	taskID := "task-1"

@@ -178,7 +178,7 @@ Phase 2（协作注入期）
 ```text
 现在请你将开发清单写入文档(目录格式为 ./ai-issue-doc/issue-xxx-todo.md, 请替换 xxx 为该 issue 的数字)， 用于后续逐一验收
 
-然后进入协作阶段：我这里有一个叫 swarm-mcp-lead 的协作 MCP Server
+然后进入协作阶段：这里有一个叫 swarm-mcp-lead 的协作 MCP Server
 你需要：
 1) 基于你刚才的分析，重新规划一次（允许重拆分/重排序）以适配多人同时协作
 2) 然后用 swarm-mcp-lead 自主完成：创建 issue、拆分 task，并把 issue 散播出去让各 worker 自行领取 task
@@ -191,15 +191,10 @@ Phase 2（协作注入期）
 - 推荐流程：createIssue -> createIssueTask -> waitIssueTaskEvents -> review/reply
 - 未经明确要求：你必须只做 lead（拆分/答疑/验收/事件循环），不要自己下场实现需求、不要去改 worker 的目标代码文件
 - 分析 issue 的实际复杂度与规模，合理拆分任务数量(一般为2-5个)，且能实现并行开发避免文件冲突(虽然 worker 们能调用文件锁)
-- **强约束** 调用 waitIssueTaskEvents 接收到事件后务必严苛审视，仔细推理分析并处理该事件，严格判断该 task 实现的正确性，处理完后需要继续不断调用 waitIssueTaskEvents
+- 调用 waitIssueTaskEvents 接收到事件后务必严苛审视，仔细推理分析并处理该事件，严格判断该 task 实现的正确性，处理完后需要继续不断调用 waitIssueTaskEvents
 - reply/review 请务必匹配其 issue_id, task_id 及 worker_id
-
-[整理阶段]
-等待 worker 们完成所有 tasks 后你需要做以下工作:
-1. 启动这个项目的后端和前端(如果该 issue 有涉及)服务器进行测试. 优先从项目的引导说明、配置文件或 Docker 设置等方式启动，根据这些配置有可能无法顺利启动, 因为它是基于 Linux 的实践, 如尝试无果后你可用其他方式启动, 你可自由调取各种命令, 该装环境就装环境, 该用代理就用代理. 记住你的目标就是启动起来实现本 issue 的测试, 包括模拟登录, 找到后门, 造数据等, 可以通过任何手段. 
-2. 启动之后你需要做的测试: 如果该 issue 有接口方面的需求与调整, 则需提供一个一键运行脚本(目录格式为 ./ai-issue-doc/issue-xxx-test.sh, 请替换 xxx 为该 issue 的数字), 该脚本不仅输出结果, 还需要打印输入原文如 curl 的请求与参数命令的原文; 如果该 issue 有 UI 方面的需求与调整, 则指出相应的 UI 位置与操作步骤并且需要你自行使用 playwright-enhanced-mcp 自测; 测试文档中的测试步骤所涉及的数据, 如果是不需要我亲自添加的(属于测试的一部分), 则都要为我造好数据; 所有测试你必须亲自跑通直到成功; 一切完成之后需要将测试步骤写入一个文档(目录格式为 ./ai-issue-doc/issue-xxx-test-steps.md, 请替换 xxx 为该 issue 的数字)
-3. 当以上所有步骤完成后，你需要向验收方交付：调用 submitDelivery，若返回结果为 rejected，你需要仔细推理分析并修复，然后再次调用 submitDelivery，如此反复，直到通过或你明确认为结论有误则可终止该 issue
-除非遇到必须由用户主动介入的情况你才能停下来向用户询问, 否则请务必完成整个流程直至交付, 在取得最终成功后, 调用 closeIssue 关闭该 issue
+- 等待 worker 们完成所有 tasks 后你需要做整体测试以及交付
+- **强约束** 务必遵循接口工具返回的 next_actions
 ```
 
 ##### Worker 提示词
@@ -216,9 +211,11 @@ Phase 2（协作注入期）
 - 若无任何 open 状态 的 issues 或 tasks 时，请务必调用 waitIssues(status=open) 或 waitIssueTasks(status=open)
 - 修改代码前必须加锁：lockFiles(files=[...])，没有有效 lockFiles 锁，不要修改任何文件，持锁期间每 ~30s 续租：heartbeat，每完成一个文件的修改后必须释放该文件锁：unlock
 - 开发中有任务不确定/或信息不足时请务必使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
-- **强约束** 领取任务后务必查阅其有关的所有文档与信息，并仔细推理分析每个细节，谨慎周密地完成该任务
+- 你可访问该项目其他未在 task 中包含的文档, 你拥有该项目所有读写权限
+- 领取任务后务必查阅其有关的所有文档与信息，并仔细推理分析每个细节，谨慎周密地完成该任务
 - **强约束** 完成任务后提交：submitIssueTask，根据返回的 next_actions 继续进行下一步
 - **强约束** 当所有 tasks 被完成后继续调用 waitIssues(status=open) 或 waitIssueTasks(status=open) 直至没有任何 open 状态的 issue
+- **强约束** 务必遵循接口工具返回的 next_actions
 ```
 
 ##### 验收（Acceptor）提示词
@@ -234,8 +231,9 @@ Phase 2（协作注入期）
 - 验收流程：swarm-mcp-acceptor.waitDeliveries(status=open) -> claimDelivery -> getIssueAcceptanceBundle -> reviewDelivery
 - **强约束** 你必须分析整个代码库以及已知的所有文档信息，务必严苛审视及充分推理分析，严格判断该 issue 实现的正确性
 - 除了推理分析，你还必须进行实际验收：执行其一键测试脚本保证运行成功; 如果需求包含界面跳转则必须调用 playwright-enhanced-mcp 做一次全流程测试，跑通整个链路(不仅是点击与查看, 需要在浏览器录入/修改/删除数据实测整个流程)并注意每个需求的细节(包括按钮/样式/布局/交互等任何需求内的界面问题)
-- 除非遇到必须由我主动介入的情况你才能停下来询问, 否则请务必完成协作流程直至验收成功
+- 当遇到必须由用户主动介入的情况你才能停下来向用户发起询问, 否则请务必完成协作流程直至验收成功
 - 当验收成功后继续调用 waitDeliveries(status=open) 直至没有任何 open 状态的 issue
+- **强约束** 务必遵循接口工具返回的 next_actions
 ```
 
 ##### 最小流程示例（端到端）

@@ -1,0 +1,2 @@
+Next: continue waiting for the next lead inbox signal (use nextIssueSignal / selectIssueInbox / stepLeadInbox).
+If you suspect the issue is already finished, list tasks to confirm whether all tasks are done/canceled.

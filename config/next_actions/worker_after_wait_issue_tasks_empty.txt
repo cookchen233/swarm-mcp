@@ -1,0 +1,2 @@
+Next: stay idle and keep waiting for open tasks (waitIssueTasks). This is expected when the issue has no open tasks for you yet.
+If you believe tasks should exist but none appear, confirm you are waiting on the correct issue_id and status.
