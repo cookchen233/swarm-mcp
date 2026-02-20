@@ -62,6 +62,36 @@ func NewServer(cfg ServerConfig, store *swarm.Store, trace *swarm.TraceService) 
 	}
 }
 
+// getNextActionText reads the next action guidance text from config file.
+// Returns a default message if file doesn't exist or can't be read.
+func (s *Server) getNextActionText() string {
+	configPath := "config/next_action.txt"
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		// Return default text if file doesn't exist
+		return "All tasks completed. Please proceed with delivery and testing."
+	}
+
+	file, err := os.Open(configPath)
+	if err != nil {
+		s.cfg.Logger.Printf("Warning: failed to open next_action config file: %v", err)
+		return "All tasks completed. Please proceed with delivery and testing."
+	}
+	defer file.Close()
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		s.cfg.Logger.Printf("Warning: failed to read next_action config file: %v", err)
+		return "All tasks completed. Please proceed with delivery and testing."
+	}
+
+	text := strings.TrimSpace(string(content))
+	if text == "" {
+		return "All tasks completed. Please proceed with delivery and testing."
+	}
+
+	return text
+}
+
 func (s *Server) Run() error {
 	s.cfg.Logger.Printf("starting %s %s", s.cfg.Name, s.cfg.Version)
 
@@ -1082,7 +1112,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 					}
 				}
 				if allDone {
-					m["next_action"] = "1. 启动这个项目的后端和前端(如果该 issue 有涉及)服务器进行测试. 优先从项目的引导说明、配置文件或 Docker 设置等方式启动，根据这些配置有可能无法顺利启动, 因为它是基于 Linux 的实践, 如尝试无果后你可用其他方式启动, 你可自由调取各种命令, 该装环境就装环境, 该用代理就用代理. 记住你的目标就是启动起来实现本 issue 的测试, 包括模拟登录, 找到后门, 造数据等, 可以通过任何手段. \n2. 启动之后你需要做的测试: 如果该 issue 有接口方面的需求与调整, 则需提供一个一键运行脚本(目录格式为  ./ai-issue-doc/test-issue-xxx.sh, 请替换 xxx 为 该issue 的数字), 该脚本不仅输出结果, 还需要打印输入原文如 curl 的请求与参数命令的原文; 如果该 issue 有 UI 方面的需求与调整, 则指出相应的 UI 位置与操作步骤并且需要你自行使用 playwright-enhanced-mcp 自测; 测试文档中的测试步骤所涉及的数据, 如果是不需要我亲自添加的(属于测试的一部分), 则都要为我造好数据; 所有测试你必须亲自跑通直到成功; 一切完成之后需要将测试步骤写入一个文档(目录格式为 ./ai-issue-doc/test-issue-xxx.md, 请替换 xxx 为 该issue 的数字)\n3. 当以上所有步骤完成后，你需要向验收方交付：调用 submitDelivery，若返回结果为 rejected，你需要仔细推理分析并修复，然后再次调用 submitDelivery，如此反复，直到通过或你明确认为结论有误则可终止该 issue\n\n除非遇到必须由用户主动介入的情况你才能停下来向用户询问, 否则请务必完成整个流程直至交付, 在取得最终成功后, 调用 closeIssue 关闭该 issue\n"
+					m["next_action"] = s.getNextActionText()
 				}
 			}
 		}
