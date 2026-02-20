@@ -121,8 +121,8 @@ func (s *IssueService) ExtendIssueTaskLease(actor, issueID, taskID string, exten
 		if task.ClaimedBy != actor {
 			return fmt.Errorf("task '%s' is not claimed by actor", taskID)
 		}
-		if task.Status != IssueTaskInProgress && task.Status != IssueTaskBlocked && task.Status != IssueTaskSubmitted {
-			return fmt.Errorf("task '%s' is not in progress/blocked/submitted (status: %s)", taskID, task.Status)
+		if task.Status != IssueTaskInProgress && task.Status != IssueTaskBlocked {
+			return fmt.Errorf("task '%s' is not in progress/blocked (status: %s)", taskID, task.Status)
 		}
 		task.LeaseExpiresAtMs = s.calcLeaseExpiryMs(extendSec, s.taskTTLSec)
 		task.UpdatedAt = NowStr()
@@ -173,7 +173,7 @@ func (s *IssueService) SweepExpired() {
 				if err := s.store.ReadJSON(p, &task); err != nil {
 					continue
 				}
-				if (task.Status == IssueTaskInProgress || task.Status == IssueTaskBlocked || task.Status == IssueTaskSubmitted) && task.LeaseExpiresAtMs > 0 && nowMs > task.LeaseExpiresAtMs {
+				if (task.Status == IssueTaskInProgress || task.Status == IssueTaskBlocked) && task.LeaseExpiresAtMs > 0 && nowMs > task.LeaseExpiresAtMs {
 					prevStatus := task.Status
 					prevOwner := task.ClaimedBy
 					task.Status = IssueTaskOpen

@@ -55,7 +55,7 @@ func allTools() []ToolDefinition {
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("issue_id", "string", "Issue ID"),
-				prop("status", "string", "Filter by status: open|in_progress|submitted|done|blocked|canceled (default open)."),
+				prop("status", "string", "Filter by status: open|in_progress|done|blocked|canceled (default open)."),
 				prop("timeout_sec", "integer", "Long-poll timeout seconds (default 3600)."),
 				prop("limit", "integer", "Max tasks to return (default 50)."),
 				required("session_id", "issue_id"),
@@ -366,7 +366,7 @@ func allTools() []ToolDefinition {
 		},
 		{
 			Name:        "submitIssueTask",
-			Description: "Submit work result for a task (moves to submitted) and block until lead reviews/resolves it (or timeout).",
+			Description: "Submit work result for a task (creates a Submission entity) and block until lead reviews/resolves it (or timeout).",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("worker_id", "string", "Worker employee ID (required). Must match task claimed_by."),
@@ -391,11 +391,12 @@ func allTools() []ToolDefinition {
 		},
 		{
 			Name:        "reviewIssueTask",
-			Description: "Lead reviews a submitted task. verdict=approved|rejected. If rejected, task goes back to in_progress.",
+			Description: "Lead reviews a task. verdict=approved|rejected. If rejected, task goes back to in_progress. Worker submit creates a Submission entity; optionally pass submission_id from waitIssueTaskEvents for precise targeting.",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("issue_id", "string", "Issue ID"),
 				prop("task_id", "string", "Task ID"),
+				prop("submission_id", "string", "Optional: Submission entity ID from waitIssueTaskEvents. If omitted, reviews the latest open submission."),
 				prop("verdict", "string", "approved|rejected"),
 				prop("feedback", "string", "Feedback if rejected (or summary if approved)"),
 				propIntEnum("completion_score", []int{1, 2, 5}, "Completion score for this task (required). 1|2|5"),
@@ -464,7 +465,7 @@ func allTools() []ToolDefinition {
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("issue_id", "string", "Issue ID"),
-				prop("status", "string", "Filter by status: open|in_progress|submitted|done|blocked|canceled|all (default all)."),
+				prop("status", "string", "Filter by status: open|in_progress|done|blocked|canceled|all (default all)."),
 				prop("subject_contains", "string", "Case-insensitive substring filter on subject."),
 				prop("claimed_by", "string", "Filter by claimed_by (exact match)."),
 				prop("submitter", "string", "Filter by submitter (exact match)."),
@@ -486,7 +487,34 @@ func allTools() []ToolDefinition {
 		},
 		{
 			Name:        "waitIssueTaskEvents",
-			Description: "Signals-only long-poll wait for issue events after a given seq. Returns only: (1) worker question/blocker messages, (2) task submitted events. Ignores other events while hanging. This is the lead window's select-like mechanism.",
+			Description: "Signals-only long-poll wait for issue inbox. Returns only: (1) worker question/blocker messages, (2) submissions. Ignores other events while hanging. This is the lead window's select-like mechanism.",
+			InputSchema: obj(
+				prop("session_id", "string", "Optional session id (cookie-like)."),
+				prop("issue_id", "string", "Issue ID"),
+				required("session_id", "issue_id"),
+			),
+		},
+		{
+			Name:        "selectIssueInbox",
+			Description: "Select next signal from issue inbox (blocks until available or timeout). Alias of waitIssueTaskEvents.",
+			InputSchema: obj(
+				prop("session_id", "string", "Optional session id (cookie-like)."),
+				prop("issue_id", "string", "Issue ID"),
+				required("session_id", "issue_id"),
+			),
+		},
+		{
+			Name:        "nextIssueSignal",
+			Description: "Wait and return next issue signal (blocks until available or timeout). Alias of waitIssueTaskEvents.",
+			InputSchema: obj(
+				prop("session_id", "string", "Optional session id (cookie-like)."),
+				prop("issue_id", "string", "Issue ID"),
+				required("session_id", "issue_id"),
+			),
+		},
+		{
+			Name:        "stepLeadInbox",
+			Description: "Take one step in lead inbox loop (blocks until available or timeout). Alias of waitIssueTaskEvents.",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("issue_id", "string", "Issue ID"),
@@ -524,11 +552,12 @@ func allTools() []ToolDefinition {
 		},
 		{
 			Name:        "replyIssueTaskMessage",
-			Description: "Lead replies to a task message (kind=reply). Will be returned by waitIssueTaskEvents.",
+			Description: "Lead replies to a task message (kind=reply). Pass message_id from waitIssueTaskEvents for threaded replies; omit to reply to the oldest open message for the task.",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
 				prop("issue_id", "string", "Issue ID"),
 				prop("task_id", "string", "Task ID"),
+				prop("message_id", "string", "Optional: TaskMessage entity ID from waitIssueTaskEvents. If omitted, replies to the oldest open message for the task."),
 				prop("content", "string", "Reply content"),
 				prop("refs", "string", "Optional references"),
 				required("session_id", "issue_id", "task_id", "content"),
@@ -537,10 +566,10 @@ func allTools() []ToolDefinition {
 		// === Workers ===
 		{
 			Name:        "registerWorker",
-			Description: "Register current window member_id as a worker identity (usually auto-called on claimIssueTask).",
+			Description: "Register (or generate) a worker identity and return the worker record. If worker_id is omitted, server generates one.",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
-				prop("worker_id", "string", "Worker ID (optional; defaults to current member_id)"),
+				prop("worker_id", "string", "Worker ID (optional). If omitted, server generates one."),
 			),
 		},
 		{
@@ -786,6 +815,9 @@ func toolAllowSetForRole(role string) map[string]bool {
 
 		// Lead event loop
 		allowed["waitIssueTaskEvents"] = true
+		allowed["selectIssueInbox"] = true
+		allowed["nextIssueSignal"] = true
+		allowed["stepLeadInbox"] = true
 		allowed["replyIssueTaskMessage"] = true
 
 		// Worker directory (lead needs worker_id for getNextStepToken)

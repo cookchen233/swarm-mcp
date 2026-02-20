@@ -46,7 +46,7 @@ func TestResetTask_ClearsAllProgressAndCleansLocksAndDocs(t *testing.T) {
 		SplitReason:      "y",
 		ImpactScope:      "z",
 		RequiredTaskDocs: []string{"spec"},
-		Status:           IssueTaskSubmitted,
+		Status:           IssueTaskInProgress,
 		ReservedToken:    "ns_1",
 		ReservedUntilMs:  123,
 		LeaseExpiresAtMs: 999,

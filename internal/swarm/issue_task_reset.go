@@ -106,6 +106,11 @@ func (s *IssueService) ResetTask(actor, issueID, taskID, reason string) (*IssueT
 		task.FeedbackDetails = nil
 		task.UpdatedAt = NowStr()
 
+		// 3b) Clean up Submission entities, TaskMessages, and inbox items for this task.
+		s.deleteSubmissionsForTaskLocked(issueID, taskID)
+		s.deleteMessagesForTaskLocked(issueID, taskID)
+		s.deleteInboxForTaskLocked(issueID, taskID)
+
 		eventsPath := s.store.Path("issues", issueID, "events.jsonl")
 		if f, err := os.Open(eventsPath); err == nil {
 			tmp := eventsPath + ".tmp"
@@ -141,12 +146,10 @@ func (s *IssueService) ResetTask(actor, issueID, taskID, reason string) (*IssueT
 				_ = os.Remove(tmp)
 			}
 			_ = f.Close()
-		} else if err != nil {
+		} else {
 			if !os.IsNotExist(err) {
 				return err
 			}
-		} else {
-			_ = f.Close()
 		}
 
 		// 4) Remove non-required task docs (keep required/spec docs created at task creation)

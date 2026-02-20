@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"fmt"
+	"strings"
 )
 
 type WorkerService struct {
@@ -14,8 +15,9 @@ func NewWorkerService(store *Store, trace *TraceService) *WorkerService {
 }
 
 func (w *WorkerService) Register(workerID string) (*Worker, error) {
+	workerID = strings.TrimSpace(workerID)
 	if workerID == "" {
-		return nil, fmt.Errorf("worker_id is required")
+		workerID = GenID("w")
 	}
 
 	var result *Worker

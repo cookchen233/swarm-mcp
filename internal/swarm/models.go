@@ -34,7 +34,6 @@ const (
 const (
 	IssueTaskOpen       = "open"
 	IssueTaskInProgress = "in_progress"
-	IssueTaskSubmitted  = "submitted"
 	IssueTaskDone       = "done"
 	IssueTaskBlocked    = "blocked"
 	IssueTaskCanceled   = "canceled"
@@ -48,20 +47,18 @@ const (
 
 // IssueEvent types
 const (
-	EventIssueCreated       = "issue_created"
-	EventIssueDelivered     = "issue_delivered"
-	EventIssueAcceptance    = "issue_acceptance"
-	EventIssueClosed        = "issue_closed"
-	EventIssueReopened      = "issue_reopened"
-	EventIssueExpired       = "issue_expired"
-	EventIssueTaskCreated   = "issue_task_created"
-	EventIssueTaskClaimed   = "issue_task_claimed"
-	EventIssueTaskExpired   = "issue_task_expired"
-	EventIssueTaskSubmitted = "issue_task_submitted"
-	EventIssueTaskReviewed  = "issue_task_reviewed"
-	EventIssueTaskResolved  = "issue_task_resolved"
-	EventIssueTaskMessage   = "issue_task_message"
-	EventIssueTaskReset     = "issue_task_reset"
+	EventIssueCreated      = "issue_created"
+	EventIssueDelivered    = "issue_delivered"
+	EventIssueClosed       = "issue_closed"
+	EventIssueReopened     = "issue_reopened"
+	EventIssueExpired      = "issue_expired"
+	EventIssueTaskCreated  = "issue_task_created"
+	EventIssueTaskClaimed  = "issue_task_claimed"
+	EventIssueTaskExpired  = "issue_task_expired"
+	EventIssueTaskReviewed = "issue_task_reviewed"
+	EventIssueTaskResolved = "issue_task_resolved"
+	EventIssueTaskMessage  = "issue_task_message"
+	EventIssueTaskReset    = "issue_task_reset"
 )
 
 // Delivery statuses
@@ -71,6 +68,99 @@ const (
 	DeliveryApproved = "approved"
 	DeliveryRejected = "rejected"
 )
+
+// Submission statuses
+const (
+	SubmissionOpen     = "open"
+	SubmissionApproved = "approved"
+	SubmissionRejected = "rejected"
+)
+
+// TaskMessage statuses
+const (
+	MessageOpen     = "open"
+	MessageReplied  = "replied"
+	MessageResolved = "resolved"
+)
+
+// InboxItem types
+const (
+	InboxTypeSubmission   = "submission"
+	InboxTypeQuestion     = "question"
+	InboxTypeBlocker      = "blocker"
+	InboxTypeDelivery     = "delivery"
+	InboxTypeReply        = "reply"
+	InboxTypeReviewResult = "review_result"
+)
+
+// InboxItem statuses
+const (
+	InboxPending    = "pending"
+	InboxProcessing = "processing"
+	InboxDone       = "done"
+)
+
+// New event types for entities
+const (
+	EventSubmissionCreated  = "submission_created"
+	EventSubmissionReviewed = "submission_reviewed"
+	EventMessageCreated     = "message_created"
+	EventMessageReplied     = "message_replied"
+)
+
+// Submission is a first-class entity created when a worker submits work.
+// Task status does NOT change to "submitted"; submission has its own state machine.
+type Submission struct {
+	ID              string              `json:"id"`
+	IssueID         string              `json:"issue_id"`
+	TaskID          string              `json:"task_id"`
+	WorkerID        string              `json:"worker_id"`
+	Artifacts       SubmissionArtifacts `json:"artifacts"`
+	Status          string              `json:"status"` // open/approved/rejected
+	Feedback        string              `json:"feedback,omitempty"`
+	ReviewArtifacts ReviewArtifacts     `json:"review_artifacts,omitempty"`
+	FeedbackDetails []FeedbackDetail    `json:"feedback_details,omitempty"`
+	CompletionScore int                 `json:"completion_score,omitempty"`
+	NextStepToken   string              `json:"next_step_token,omitempty"`
+	ReviewedBy      string              `json:"reviewed_by,omitempty"`
+	CreatedAt       string              `json:"created_at"`
+	UpdatedAt       string              `json:"updated_at"`
+}
+
+// TaskMessage is a first-class entity for worker↔lead Q&A threads.
+// It has its own state machine so both sides can track resolution.
+type TaskMessage struct {
+	ID           string `json:"id"`
+	IssueID      string `json:"issue_id"`
+	TaskID       string `json:"task_id"`
+	SenderID     string `json:"sender_id"`
+	Kind         string `json:"kind"` // question/blocker
+	Content      string `json:"content"`
+	Refs         string `json:"refs"`
+	Status       string `json:"status"` // open/replied/resolved
+	ReplyContent string `json:"reply_content,omitempty"`
+	ReplyBy      string `json:"reply_by,omitempty"`
+	RepliedAt    string `json:"replied_at,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
+}
+
+// InboxItem is a reliable delivery unit in the lead/worker inbox queues.
+// It enables single-consumer semantics and prevents duplicate processing.
+type InboxItem struct {
+	ID               string `json:"id"`
+	IssueID          string `json:"issue_id"`
+	TaskID           string `json:"task_id"`
+	Type             string `json:"type"`   // InboxType* constant
+	RefID            string `json:"ref_id"` // submission_id or message_id
+	SenderID         string `json:"sender_id"`
+	Target           string `json:"target"` // "lead" or worker_id
+	Status           string `json:"status"` // pending/processing/done
+	ClaimedBy        string `json:"claimed_by,omitempty"`
+	ClaimExpiresAtMs int64  `json:"claim_expires_at_ms,omitempty"`
+	CreatedAt        string `json:"created_at"`
+	UpdatedAt        string `json:"updated_at"`
+}
 
 type Worker struct {
 	ID        string `json:"id"`
@@ -123,10 +213,6 @@ type Issue struct {
 type DocRef struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-}
-
-type issueCursor struct {
-	AfterSeq int64 `json:"after_seq"`
 }
 
 type SubmissionArtifacts struct {
@@ -271,15 +357,18 @@ type IssueTask struct {
 }
 
 type IssueEvent struct {
-	Seq                 int64                `json:"seq"`
-	Type                string               `json:"type"`
-	ParentSeq           int64                `json:"parent_seq,omitempty"`
-	IssueID             string               `json:"issue_id"`
-	TaskID              string               `json:"task_id"`
-	Actor               string               `json:"actor"`
-	Kind                string               `json:"kind"`
-	Detail              string               `json:"detail"`
-	Refs                string               `json:"refs"`
+	Seq       int64  `json:"seq"`
+	Type      string `json:"type"`
+	ParentSeq int64  `json:"parent_seq,omitempty"`
+	IssueID   string `json:"issue_id"`
+	TaskID    string `json:"task_id"`
+	Actor     string `json:"actor"`
+	Kind      string `json:"kind"`
+	Detail    string `json:"detail"`
+	Refs      string `json:"refs"`
+	// Entity IDs for threading (new in v2 model)
+	SubmissionID        string               `json:"submission_id,omitempty"`
+	MessageID           string               `json:"message_id,omitempty"`
 	DeliveryArtifacts   *DeliveryArtifacts   `json:"delivery_artifacts,omitempty"`
 	SubmissionArtifacts *SubmissionArtifacts `json:"submission_artifacts,omitempty"`
 	ReviewArtifacts     *ReviewArtifacts     `json:"review_artifacts,omitempty"`

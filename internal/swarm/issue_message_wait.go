@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// PostTaskMessage creates a TaskMessage entity and pushes it to the lead inbox.
+// kind must be "question" or "blocker". Returns a synthetic IssueEvent for API compat.
 func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, refs string) (*IssueEvent, error) {
 	if issueID == "" || taskID == "" {
 		return nil, fmt.Errorf("issue_id and task_id are required")
@@ -14,12 +16,11 @@ func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, re
 		actor = "worker"
 	}
 	if kind == "" {
-		kind = "message"
+		kind = "question"
 	}
 
 	var ev *IssueEvent
 	err := s.store.WithLock(func() error {
-		// Ensure task exists
 		task, err := s.loadTaskLocked(issueID, taskID)
 		if err != nil {
 			return err
@@ -33,28 +34,27 @@ func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, re
 			}
 		}
 
-		// State machine linkage:
-		// - question/blocker => blocked
-		// - reply => unblock back to in_progress
-		switch kind {
-		case "question", "blocker":
-			if task.Status == IssueTaskInProgress {
-				task.Status = IssueTaskBlocked
-				task.UpdatedAt = NowStr()
-				if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
-					return err
-				}
-			}
-		case "reply":
-			if task.Status == IssueTaskBlocked {
-				task.Status = IssueTaskInProgress
-				task.UpdatedAt = NowStr()
-				if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
-					return err
-				}
+		// Create the TaskMessage entity.
+		msg, err := s.createTaskMessageLocked(issueID, taskID, actor, kind, content, refs)
+		if err != nil {
+			return err
+		}
+
+		// State machine: question/blocker → blocked.
+		if (kind == "question" || kind == "blocker") && task.Status == IssueTaskInProgress {
+			task.Status = IssueTaskBlocked
+			task.UpdatedAt = NowStr()
+			if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
+				return err
 			}
 		}
 
+		// Push to lead inbox.
+		if _, err := s.pushToLeadInboxLocked(issueID, taskID, kind, msg.ID, actor); err != nil {
+			return err
+		}
+
+		// Append audit event.
 		e := IssueEvent{
 			Type:      EventIssueTaskMessage,
 			IssueID:   issueID,
@@ -63,6 +63,7 @@ func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, re
 			Kind:      kind,
 			Detail:    content,
 			Refs:      refs,
+			MessageID: msg.ID,
 			Timestamp: NowStr(),
 		}
 		seq, err := s.appendEventLockedWithSeq(issueID, &e)
@@ -80,48 +81,81 @@ func (s *IssueService) PostTaskMessage(issueID, taskID, actor, kind, content, re
 	return ev, nil
 }
 
-func (s *IssueService) ReplyTaskMessage(issueID, taskID, actor, content, refs string) (*IssueEvent, error) {
-	return s.PostTaskMessage(issueID, taskID, actor, "reply", content, refs)
-}
-
-// WaitTaskEvents blocks until there are new events for a specific task after the given seq.
-// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 3600.
-func (s *IssueService) WaitTaskEvents(issueID, taskID string, afterSeq int64, timeoutSec, limit int) ([]IssueEvent, int64, error) {
+// ReplyTaskMessage replies to a specific TaskMessage by messageID, or the oldest open message if empty.
+// This is the lead→worker reply path.
+func (s *IssueService) ReplyTaskMessage(issueID, taskID, actor, messageID, content, refs string) (*IssueEvent, error) {
 	if issueID == "" || taskID == "" {
-		return nil, afterSeq, fmt.Errorf("issue_id and task_id are required")
+		return nil, fmt.Errorf("issue_id and task_id are required")
 	}
-	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
-	if limit <= 0 {
-		limit = 20
+	if actor == "" {
+		actor = "lead"
 	}
 
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
-	poll := 200 * time.Millisecond
-
-	for {
-		events, nextSeq, err := s.readTaskEventsAfter(issueID, taskID, afterSeq, limit)
+	var ev *IssueEvent
+	err := s.store.WithLock(func() error {
+		task, err := s.loadTaskLocked(issueID, taskID)
 		if err != nil {
-			return nil, afterSeq, err
-		}
-		if len(events) > 0 {
-			return events, nextSeq, nil
+			return err
 		}
 
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return []IssueEvent{}, afterSeq, nil
+		// Find the message to reply to.
+		msg, err := s.resolveMessageForReply(issueID, taskID, messageID)
+		if err != nil {
+			return err
 		}
 
-		if remaining < poll {
-			time.Sleep(remaining)
-		} else {
-			time.Sleep(poll)
+		// Update the message entity.
+		repliedMsg, err := s.replyTaskMessageLocked(issueID, msg.ID, actor, content, refs)
+		if err != nil {
+			return err
 		}
+
+		// Ack the lead inbox item for this message.
+		s.ackLeadInboxByRefLocked(issueID, msg.ID)
+
+		// Push reply to worker inbox.
+		if task.ClaimedBy != "" {
+			_, _ = s.pushToWorkerInboxLocked(issueID, task.ClaimedBy, taskID, InboxTypeReply, msg.ID, actor)
+		}
+
+		// State machine: reply → unblock back to in_progress.
+		if task.Status == IssueTaskBlocked {
+			task.Status = IssueTaskInProgress
+			task.UpdatedAt = NowStr()
+			if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
+				return err
+			}
+		}
+
+		// Append audit event.
+		e := IssueEvent{
+			Type:      EventIssueTaskMessage,
+			IssueID:   issueID,
+			TaskID:    taskID,
+			Actor:     actor,
+			Kind:      "reply",
+			Detail:    content,
+			Refs:      repliedMsg.Refs,
+			MessageID: msg.ID,
+			Timestamp: NowStr(),
+		}
+		seq, err := s.appendEventLockedWithSeq(issueID, &e)
+		if err != nil {
+			return err
+		}
+		e.Seq = seq
+		ev = &e
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
+	s.bump(issueID)
+	return ev, nil
 }
 
-// AskIssueTask posts a question/blocker message and blocks until a reply is received.
-// It returns the question event and the reply event (kind=reply).
+// AskIssueTask creates a TaskMessage entity and blocks until the lead replies.
+// Returns a map with "question" (event) and "reply" (event) on success.
 func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs string, timeoutSec int) (map[string]any, error) {
 	if kind == "" {
 		kind = "question"
@@ -131,19 +165,18 @@ func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs 
 	}
 	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
 
-	q, err := s.PostTaskMessage(issueID, taskID, actor, kind, content, refs)
+	qEvent, err := s.PostTaskMessage(issueID, taskID, actor, kind, content, refs)
 	if err != nil {
 		return nil, err
 	}
+	messageID := qEvent.MessageID
 
-	// Ensure the task lease covers the blocking wait period.
-	// This prevents the task from being auto-reopened (expired) while the worker is waiting for a reply.
+	// Extend task lease to cover the wait period.
 	_ = s.store.WithLock(func() error {
 		task, err := s.loadTaskLocked(issueID, taskID)
 		if err != nil {
 			return nil
 		}
-		// Only extend lease for the current claimant.
 		if actor != "" && task.ClaimedBy == actor {
 			nowMs := time.Now().UnixMilli()
 			minLeaseMs := nowMs + int64(s.defaultTimeoutSec)*1000
@@ -156,137 +189,105 @@ func (s *IssueService) AskIssueTask(issueID, taskID, actor, kind, content, refs 
 		return nil
 	})
 
-	// Wait for a reply after the question seq.
-	after := q.Seq
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil, fmt.Errorf("timeout waiting for reply")
-		}
-		// Shorter polling slices so we can respect deadline precisely.
-		slice := 5
-		if remaining < 5*time.Second {
-			slice = int(remaining.Seconds())
-			if slice <= 0 {
-				slice = 1
-			}
-		}
-
-		events, nextSeq, err := s.WaitTaskEvents(issueID, taskID, after, slice, 50)
-		if err != nil {
-			return nil, err
-		}
-		for _, ev := range events {
-			if ev.Type == EventIssueTaskMessage && ev.Kind == "reply" {
-				return map[string]any{
-					"question": q,
-					"reply":    ev,
-					"next_seq": nextSeq,
-				}, nil
-			}
-		}
-		after = nextSeq
+	// Poll the TaskMessage entity until it has a reply (entity-based, not event-scanning).
+	repliedMsg, err := s.pollMessageReply(issueID, messageID, timeoutSec)
+	if err != nil {
+		return nil, err
 	}
+
+	replyEvent := IssueEvent{
+		Type:      EventIssueTaskMessage,
+		IssueID:   issueID,
+		TaskID:    taskID,
+		Actor:     repliedMsg.ReplyBy,
+		Kind:      "reply",
+		Detail:    repliedMsg.ReplyContent,
+		Refs:      repliedMsg.Refs,
+		MessageID: messageID,
+		Timestamp: repliedMsg.RepliedAt,
+	}
+
+	return map[string]any{
+		"question":   qEvent,
+		"reply":      replyEvent,
+		"message_id": messageID,
+	}, nil
 }
 
-// WaitIssueTaskEvents blocks until there are new signal events for this issue.
-// Signals are:
-// 1) worker question/blocker messages (issue_task_message kind=question|blocker)
-// 2) task submitted events (issue_task_submitted)
-//
-// Cursor semantics:
-// - If afterSeq >= 0: use it as the explicit cursor.
-// - If afterSeq < 0: auto-resume from a persisted per-(issue,actor) cursor. If missing, tail to the current end.
-//
-// It returns up to limit events (default 20). If timeoutSec <= 0, defaults to 3600.
+// WaitIssueTaskEvents blocks until a lead inbox item is available (submission or question/blocker).
+// Uses the inbox queue for reliable single-consumer delivery instead of event cursor scanning.
+// Returns up to 1 signal event. timeoutSec <= 0 defaults to service default.
 func (s *IssueService) WaitIssueTaskEvents(issueID, actor string, afterSeq int64, timeoutSec, limit int) ([]IssueEvent, int64, error) {
 	if issueID == "" {
 		return nil, afterSeq, fmt.Errorf("issue_id is required")
+	}
+	if !s.store.Exists("issues", issueID, "issue.json") {
+		return nil, afterSeq, fmt.Errorf("issue '%s' not found", issueID)
 	}
 	s.SweepExpired()
 	if actor == "" {
 		actor = "lead"
 	}
+	var issue Issue
+	if err := s.store.ReadJSON(s.store.Path("issues", issueID, "issue.json"), &issue); err != nil {
+		return nil, afterSeq, err
+	}
+	if issue.Status == IssueDone || issue.Status == IssueCanceled {
+		return []IssueEvent{}, afterSeq, nil
+	}
+	tasks, err := s.ListTasks(issueID, "")
+	if err != nil {
+		return nil, afterSeq, err
+	}
+	if len(tasks) == 0 {
+		return []IssueEvent{}, afterSeq, nil
+	}
+	allDone := true
+	for _, t := range tasks {
+		if t.Status != IssueTaskDone && t.Status != IssueTaskCanceled {
+			allDone = false
+			break
+		}
+	}
+	if allDone {
+		return []IssueEvent{}, afterSeq, nil
+	}
 	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
-	if limit <= 0 {
-		limit = 20
+
+	// Sweep stale inbox claims before polling.
+	s.sweepInboxClaims(issueID)
+
+	// Claim the oldest pending inbox item (blocks until found or timeout).
+	item, err := s.claimLeadInboxBlocking(issueID, actor, timeoutSec)
+	if err != nil {
+		return nil, afterSeq, err
+	}
+	if item == nil {
+		// Timeout with no items.
+		return []IssueEvent{}, afterSeq, nil
 	}
 
-	cursorPath := s.store.Path("issues", issueID, "cursors", actor+".json")
-	if afterSeq < 0 {
-		// Try resume
-		var c issueCursor
-		if err := s.store.ReadJSON(cursorPath, &c); err == nil {
-			afterSeq = c.AfterSeq
-		} else {
-			// No cursor found: start from the beginning.
-			// Use -1 so we include seq=0 events.
-			// This avoids missing already-emitted signal events when a lead starts waiting late.
-			afterSeq = -1
+	// Convert inbox item to an event-shaped response for API compatibility.
+	mat := s.materializeInboxItem(issueID, item)
+	ev := IssueEvent{
+		Type:         fmt.Sprint(mat["type"]),
+		IssueID:      issueID,
+		TaskID:       fmt.Sprint(mat["task_id"]),
+		Actor:        fmt.Sprint(mat["actor"]),
+		Kind:         fmt.Sprint(mat["kind"]),
+		Detail:       fmt.Sprint(mat["detail"]),
+		Refs:         fmt.Sprint(mat["refs"]),
+		Timestamp:    fmt.Sprint(mat["timestamp"]),
+		SubmissionID: fmt.Sprint(mat["submission_id"]),
+		MessageID:    fmt.Sprint(mat["message_id"]),
+	}
+	if sa, ok := mat["submission_artifacts"]; ok {
+		if saTyped, ok2 := sa.(SubmissionArtifacts); ok2 {
+			ev.SubmissionArtifacts = &saTyped
 		}
 	}
+	// Use -1 as the seq since we're no longer event-seq based.
+	ev.Seq = -1
 
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
-	// Polling interval: keep it small so cross-process submissions are picked up quickly,
-	// but not too small to avoid busy-wait.
-	poll := 200 * time.Millisecond
-
-	for {
-		s.SweepExpired()
-		events, nextSeq, err := s.readEventsAfter(issueID, afterSeq, limit)
-		if err != nil {
-			return nil, afterSeq, err
-		}
-		if len(events) > 0 {
-			// Signals-only long-poll: only return when there is actionable input.
-			// Allowed return cases:
-			// 1) Worker asks a question/blocker (issue_task_message kind=question|blocker)
-			// 2) Worker submits a task (issue_task_submitted)
-			var signals []IssueEvent
-			for _, ev := range events {
-				switch ev.Type {
-				case EventIssueTaskSubmitted:
-					signals = append(signals, ev)
-				case EventIssueTaskMessage:
-					if ev.Kind == "question" || ev.Kind == "blocker" {
-						signals = append(signals, ev)
-					}
-				}
-			}
-			if len(signals) > 0 {
-				// Return at most one signal event.
-				first := signals[0]
-				advanceTo := first.Seq
-				_ = s.store.WithLock(func() error {
-					s.store.EnsureDir("issues", issueID, "cursors")
-					return s.store.WriteJSON(cursorPath, &issueCursor{AfterSeq: advanceTo})
-				})
-				return []IssueEvent{first}, advanceTo, nil
-			}
-			// Skip non-signal events: advance cursor and keep hanging.
-			afterSeq = nextSeq
-			_ = s.store.WithLock(func() error {
-				s.store.EnsureDir("issues", issueID, "cursors")
-				return s.store.WriteJSON(cursorPath, &issueCursor{AfterSeq: afterSeq})
-			})
-			continue
-		}
-
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			_ = s.store.WithLock(func() error {
-				s.store.EnsureDir("issues", issueID, "cursors")
-				return s.store.WriteJSON(cursorPath, &issueCursor{AfterSeq: afterSeq})
-			})
-			return []IssueEvent{}, afterSeq, nil
-		}
-
-		// Cross-process friendly long-poll: sleep a short interval then retry.
-		if remaining < poll {
-			time.Sleep(remaining)
-		} else {
-			time.Sleep(poll)
-		}
-	}
+	return []IssueEvent{ev}, afterSeq, nil
 }

@@ -149,6 +149,10 @@ func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, arti
 		if err := s.store.WriteJSON(s.store.Path("deliveries", d.ID+".json"), d); err != nil {
 			return err
 		}
+		// Push to acceptor inbox for reliable claim-based waiting.
+		if _, err := s.pushToAcceptorInboxLocked(issueID, d.ID, actor); err != nil {
+			return err
+		}
 		result = d
 		return nil
 	})
@@ -158,6 +162,59 @@ func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, arti
 
 	s.bump("deliveries")
 	return result, nil
+}
+
+// WaitDeliveries blocks until at least one open delivery is available for review.
+// It uses acceptor inbox claim semantics (single-consumer). Returned deliveries are already claimed (status=in_review).
+// status is kept for backward compatibility; only "open" is supported in v2.
+func (s *IssueService) WaitDeliveries(status string, timeoutSec, limit int) ([]Delivery, error) {
+	s.SweepExpired()
+	status = strings.TrimSpace(strings.ToLower(status))
+	if status == "" {
+		status = DeliveryOpen
+	}
+	if status != DeliveryOpen {
+		return nil, fmt.Errorf("only status '%s' is supported", DeliveryOpen)
+	}
+	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+
+	deadline := s.deadline(timeoutSec)
+	out := make([]Delivery, 0, limit)
+	for len(out) < limit {
+		if timeExpired(deadline) {
+			break
+		}
+		item, err := s.claimAcceptorDeliveryInboxBlocking("acceptor", int(time.Until(deadline).Seconds()))
+		if err != nil {
+			return nil, err
+		}
+		if item == nil {
+			break
+		}
+
+		// Claim the delivery (atomically transitions to in_review).
+		d, err := s.ClaimDelivery("acceptor", item.RefID, 0)
+		if err != nil {
+			// If claim fails (already claimed/reviewed), mark inbox done to prevent reprocessing.
+			_ = s.store.WithLock(func() error {
+				s.ackAcceptorInboxByDeliveryLocked(item.RefID)
+				return nil
+			})
+			continue
+		}
+		_ = s.store.WithLock(func() error {
+			s.ackAcceptorInboxByDeliveryLocked(item.RefID)
+			return nil
+		})
+		out = append(out, *d)
+	}
+	return out, nil
 }
 
 func (s *IssueService) GetDelivery(deliveryID string) (*Delivery, error) {
@@ -372,46 +429,6 @@ func (s *IssueService) ReviewDelivery(actor, deliveryID, verdict, feedback, refs
 
 	s.bump("deliveries")
 	return result, nil
-}
-
-// WaitDeliveries blocks until at least one delivery matching status exists.
-// - If deliveries exist immediately, returns them without waiting.
-// - status defaults to "open" if empty.
-// - If timeoutSec <= 0, defaults to 3600.
-func (s *IssueService) WaitDeliveries(status string, timeoutSec, limit int) ([]Delivery, error) {
-	s.SweepExpired()
-	if strings.TrimSpace(status) == "" {
-		status = DeliveryOpen
-	}
-	timeoutSec = s.normalizeTimeoutSec(timeoutSec)
-	if limit <= 0 {
-		limit = 50
-	}
-
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
-	poll := 200 * time.Millisecond
-	for {
-		s.SweepExpired()
-		ds, err := s.ListDeliveries(status, "", "", "")
-		if err != nil {
-			return nil, err
-		}
-		if len(ds) > 0 {
-			if len(ds) > limit {
-				ds = ds[:limit]
-			}
-			return ds, nil
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return []Delivery{}, nil
-		}
-		if remaining < poll {
-			time.Sleep(remaining)
-		} else {
-			time.Sleep(poll)
-		}
-	}
 }
 
 func (s *IssueService) WaitDeliveryReviewed(deliveryID string, timeoutSec int) (*Delivery, error) {

@@ -1,134 +1,167 @@
-//go:build legacy
-// +build legacy
-
 package swarm
 
 import (
 	"fmt"
-	"sort"
+	"os"
+	"strings"
 )
 
-type MessageService struct {
-	store *Store
-	trace *TraceService
-}
-
-func NewMessageService(store *Store, trace *TraceService) *MessageService {
-	return &MessageService{store: store, trace: trace}
-}
-
-func (s *MessageService) SendMessage(team, from, to, content, refs string) (*Message, error) {
-	if team == "" || from == "" || to == "" || content == "" {
-		return nil, fmt.Errorf("team, from, to, and content are required")
-	}
-
-	msg := &Message{
+// createTaskMessageLocked creates a TaskMessage entity. Must be called under store lock.
+func (s *IssueService) createTaskMessageLocked(issueID, taskID, senderID, kind, content, refs string) (*TaskMessage, error) {
+	msg := &TaskMessage{
 		ID:        GenID("msg"),
-		Team:      team,
-		From:      from,
-		To:        to,
+		IssueID:   issueID,
+		TaskID:    taskID,
+		SenderID:  senderID,
+		Kind:      kind,
 		Content:   content,
 		Refs:      refs,
+		Status:    MessageOpen,
 		CreatedAt: NowStr(),
+		UpdatedAt: NowStr(),
 	}
-
-	err := s.store.WithLock(func() error {
-		dir := s.store.EnsureDir("teams", team, "inbox", to)
-		path := s.store.Path("teams", team, "inbox", to, msg.ID+".json")
-		_ = dir
-		return s.store.WriteJSON(path, msg)
-	})
-
-	if err == nil {
-		s.trace.Log(TraceEvent{
-			Type:    EventMessageSent,
-			Team:    team,
-			Actor:   from,
-			Subject: to,
-			Detail:  content,
-		})
+	s.store.EnsureDir("issues", issueID, "messages")
+	path := s.store.Path("issues", issueID, "messages", msg.ID+".json")
+	if err := s.store.WriteJSON(path, msg); err != nil {
+		return nil, err
 	}
-
-	return msg, err
+	return msg, nil
 }
 
-func (s *MessageService) BroadcastMessage(team, from, content, refs string) (*Message, error) {
-	if team == "" || from == "" || content == "" {
-		return nil, fmt.Errorf("team, from, and content are required")
+// getTaskMessageLocked reads a TaskMessage by ID. Must be called under store lock.
+func (s *IssueService) getTaskMessageLocked(issueID, messageID string) (*TaskMessage, error) {
+	path := s.store.Path("issues", issueID, "messages", messageID+".json")
+	var msg TaskMessage
+	if err := s.store.ReadJSON(path, &msg); err != nil {
+		return nil, fmt.Errorf("message '%s' not found", messageID)
 	}
-
-	// Load team members
-	cfgPath := s.store.Path("teams", team, "config.json")
-	var cfg TeamConfig
-	if err := s.store.ReadJSON(cfgPath, &cfg); err != nil {
-		return nil, fmt.Errorf("team '%s' not found", team)
-	}
-
-	msg := &Message{
-		ID:        GenID("msg"),
-		Team:      team,
-		From:      from,
-		To:        "",
-		Content:   content,
-		Refs:      refs,
-		CreatedAt: NowStr(),
-	}
-
-	err := s.store.WithLock(func() error {
-		for _, member := range cfg.Members {
-			if member == from {
-				continue
-			}
-			s.store.EnsureDir("teams", team, "inbox", member)
-			path := s.store.Path("teams", team, "inbox", member, msg.ID+".json")
-			if err := s.store.WriteJSON(path, msg); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-
-	if err == nil {
-		s.trace.Log(TraceEvent{
-			Type:    EventMessageSent,
-			Team:    team,
-			Actor:   from,
-			Subject: "broadcast",
-			Detail:  content,
-		})
-	}
-
-	return msg, err
+	return &msg, nil
 }
 
-func (s *MessageService) ReadInbox(team, member string, limit int) ([]Message, error) {
-	if team == "" || member == "" {
-		return nil, fmt.Errorf("team and member are required")
-	}
-	if limit <= 0 {
-		limit = 50
-	}
-
-	dir := s.store.Path("teams", team, "inbox", member)
-	files, err := s.store.ListJSONFiles(dir)
+// replyTaskMessageLocked marks a message as replied and stores the reply. Must be called under store lock.
+func (s *IssueService) replyTaskMessageLocked(issueID, messageID, actor, content, refs string) (*TaskMessage, error) {
+	msg, err := s.getTaskMessageLocked(issueID, messageID)
 	if err != nil {
 		return nil, err
 	}
+	if msg.Status == MessageReplied || msg.Status == MessageResolved {
+		return nil, fmt.Errorf("message '%s' already has a reply (status: %s)", messageID, msg.Status)
+	}
+	msg.Status = MessageReplied
+	msg.ReplyContent = content
+	msg.ReplyBy = actor
+	msg.RepliedAt = NowStr()
+	msg.UpdatedAt = NowStr()
+	if refs != "" {
+		msg.Refs = refs
+	}
+	path := s.store.Path("issues", issueID, "messages", msg.ID+".json")
+	if err := s.store.WriteJSON(path, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
 
-	// Sort by filename (contains timestamp-based ID) descending for newest first
-	sort.Sort(sort.Reverse(sort.StringSlice(files)))
-
-	var messages []Message
-	for i, f := range files {
-		if i >= limit {
-			break
+// GetTaskMessage returns a single TaskMessage by ID.
+func (s *IssueService) GetTaskMessage(issueID, messageID string) (*TaskMessage, error) {
+	var result *TaskMessage
+	err := s.store.WithLock(func() error {
+		msg, err := s.getTaskMessageLocked(issueID, messageID)
+		if err != nil {
+			return err
 		}
-		var msg Message
+		result = msg
+		return nil
+	})
+	return result, err
+}
+
+// ListTaskMessages returns all messages for an issue (optionally filtered by taskID).
+func (s *IssueService) ListTaskMessages(issueID, taskID string) ([]TaskMessage, error) {
+	dir := s.store.Path("issues", issueID, "messages")
+	files, err := s.store.ListJSONFiles(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []TaskMessage{}, nil
+		}
+		return nil, err
+	}
+	var out []TaskMessage
+	for _, f := range files {
+		var msg TaskMessage
 		if err := s.store.ReadJSON(f, &msg); err != nil {
 			continue
 		}
-		messages = append(messages, msg)
+		if taskID != "" && msg.TaskID != taskID {
+			continue
+		}
+		out = append(out, msg)
 	}
+	return out, nil
+}
 
-	return messages, nil
+// deleteMessagesForTaskLocked removes all message files for a task. Call under store lock.
+func (s *IssueService) deleteMessagesForTaskLocked(issueID, taskID string) {
+	dir := s.store.Path("issues", issueID, "messages")
+	files, _ := s.store.ListJSONFiles(dir)
+	for _, f := range files {
+		var msg TaskMessage
+		if err := s.store.ReadJSON(f, &msg); err != nil {
+			continue
+		}
+		if msg.TaskID != taskID {
+			continue
+		}
+		_ = s.store.Remove(f)
+	}
+}
+
+// pollMessageReply polls until the message has a reply. Used by AskIssueTask blocking wait.
+func (s *IssueService) pollMessageReply(issueID, messageID string, timeoutSec int) (*TaskMessage, error) {
+	deadline := s.deadline(timeoutSec)
+	for {
+		var msg *TaskMessage
+		_ = s.store.WithLock(func() error {
+			found, err := s.getTaskMessageLocked(issueID, messageID)
+			if err == nil {
+				msg = found
+			}
+			return nil
+		})
+		if msg != nil && (msg.Status == MessageReplied || msg.Status == MessageResolved) {
+			return msg, nil
+		}
+		if timeExpired(deadline) {
+			return nil, fmt.Errorf("timeout waiting for reply to message '%s'", messageID)
+		}
+		sleepPoll()
+	}
+}
+
+// resolveMessageForReply finds the message to reply to. If messageID is given, use it.
+// Otherwise find the oldest open message for the task.
+func (s *IssueService) resolveMessageForReply(issueID, taskID, messageID string) (*TaskMessage, error) {
+	if strings.TrimSpace(messageID) != "" {
+		return s.getTaskMessageLocked(issueID, messageID)
+	}
+	// Find oldest open message for this task
+	dir := s.store.Path("issues", issueID, "messages")
+	files, _ := s.store.ListJSONFiles(dir)
+	var oldest *TaskMessage
+	for _, f := range files {
+		var msg TaskMessage
+		if err := s.store.ReadJSON(f, &msg); err != nil {
+			continue
+		}
+		if msg.TaskID != taskID || msg.Status != MessageOpen {
+			continue
+		}
+		if oldest == nil || msg.CreatedAt < oldest.CreatedAt {
+			oldest = &msg
+		}
+	}
+	if oldest == nil {
+		return nil, fmt.Errorf("no open message found for task '%s'", taskID)
+	}
+	return oldest, nil
 }

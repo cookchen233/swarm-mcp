@@ -266,6 +266,10 @@ resp=$(call 3 "tools/list" '{}')
 assert_contains "lists lockFiles tool" "$resp" "lockFiles"
 assert_contains "lists createIssue tool" "$resp" "createIssue"
 assert_contains "lists myProfile" "$resp" "myProfile"
+assert_contains "lists waitIssueTaskEvents tool" "$resp" "waitIssueTaskEvents"
+assert_contains "lists selectIssueInbox tool" "$resp" "selectIssueInbox"
+assert_contains "lists nextIssueSignal tool" "$resp" "nextIssueSignal"
+assert_contains "lists stepLeadInbox tool" "$resp" "stepLeadInbox"
 assert_not_contains "does not expose openSession" "$resp" "openSession"
 echo ""
 
@@ -308,11 +312,11 @@ echo "[Test 3.2] Lead waitIssueTaskEvents until submitted"
 resp=""
 for _ in $(seq 1 30); do
     resp=$(tool_call 9 "waitIssueTaskEvents" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"timeout_sec\":5}")
-    if echo "$resp" | grep -Fq "issue_task_submitted"; then
+    if echo "$resp" | grep -Fq "submission_created"; then
         break
     fi
 done
-assert_contains "sees submitted" "$resp" "issue_task_submitted"
+assert_contains "sees submitted" "$resp" "submission_created"
 
 echo "[Test 3.3] Review Issue Task"
 resp=$(tool_call 10 "getIssueTask" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\"}")

@@ -300,8 +300,8 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 		return nil, err
 	}
 
-	// waitReviewTimeoutSec will be set dynamically based on service configuration
-	var submitSeq int64
+	// Create a Submission entity; task status stays in_progress.
+	var submissionID string
 	err := s.store.WithLock(func() error {
 		task, err := s.loadTaskLocked(issueID, taskID)
 		if err != nil {
@@ -313,63 +313,66 @@ func (s *IssueService) SubmitTask(issueID, taskID, actor string, artifacts Submi
 		if strings.TrimSpace(task.ClaimedBy) != strings.TrimSpace(actor) {
 			return fmt.Errorf("task '%s' is not claimed by actor", taskID)
 		}
-		if task.Status != IssueTaskInProgress && task.Status != IssueTaskSubmitted {
-			return fmt.Errorf("task '%s' is not in progress/submitted (status: %s)", taskID, task.Status)
+		if task.Status != IssueTaskInProgress && task.Status != IssueTaskBlocked {
+			return fmt.Errorf("task '%s' is not in progress (status: %s)", taskID, task.Status)
 		}
 
-		task.Submitter = actor
-		task.SubmissionArtifacts = artifacts
-		task.Status = IssueTaskSubmitted
+		// Extend lease to cover the review wait period.
 		nowMs := time.Now().UnixMilli()
 		minLeaseMs := nowMs + int64(s.defaultTimeoutSec)*1000
 		if task.LeaseExpiresAtMs < minLeaseMs {
 			task.LeaseExpiresAtMs = minLeaseMs
+			task.UpdatedAt = NowStr()
+			if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
+				return err
+			}
 		}
-		task.UpdatedAt = NowStr()
-		if err := s.store.WriteJSON(s.store.Path("issues", issueID, "tasks", task.ID+".json"), task); err != nil {
-			return err
-		}
-		ev := IssueEvent{Type: EventIssueTaskSubmitted, IssueID: issueID, TaskID: task.ID, Actor: actor, Detail: "submitted", Refs: "", SubmissionArtifacts: &artifacts, Timestamp: NowStr()}
-		seq, err := s.appendEventLockedWithSeq(issueID, &ev)
+
+		// Create the Submission entity.
+		sub, err := s.createSubmissionLocked(issueID, task.ID, actor, artifacts)
 		if err != nil {
 			return err
 		}
-		submitSeq = seq
-		return nil
+		submissionID = sub.ID
+
+		// Push to lead inbox.
+		if _, err := s.pushToLeadInboxLocked(issueID, taskID, InboxTypeSubmission, sub.ID, actor); err != nil {
+			return err
+		}
+
+		// Append audit event (task status is NOT changed).
+		ev := IssueEvent{
+			Type:                EventSubmissionCreated,
+			IssueID:             issueID,
+			TaskID:              task.ID,
+			Actor:               actor,
+			SubmissionArtifacts: &artifacts,
+			Timestamp:           NowStr(),
+			SubmissionID:        sub.ID,
+		}
+		_, err = s.appendEventLockedWithSeq(issueID, &ev)
+		return err
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	s.bump(issueID)
-	deadline := time.Now().Add(time.Duration(s.defaultTimeoutSec) * time.Second)
-	after := submitSeq
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return nil, fmt.Errorf("timeout waiting for lead review")
-		}
-		slice := 5
-		if remaining < 5*time.Second {
-			slice = int(remaining.Seconds())
-			if slice <= 0 {
-				slice = 1
-			}
-		}
-		events, nextSeq, err := s.WaitTaskEvents(issueID, taskID, after, slice, 50)
-		if err != nil {
-			return nil, err
-		}
-		for _, ev := range events {
-			if ev.Type == EventIssueTaskReviewed || ev.Type == EventIssueTaskResolved {
-				return s.GetTask(issueID, taskID)
-			}
-		}
-		after = nextSeq
+
+	// Block until the Submission is reviewed (approved or rejected).
+	sub, err := s.pollSubmissionStatus(issueID, submissionID, s.defaultTimeoutSec)
+	if err != nil {
+		return nil, err
 	}
+	// If approved, the Submission review also updated the task to done.
+	// If rejected, task is still in_progress — worker can resubmit.
+	_ = sub
+	return s.GetTask(issueID, taskID)
 }
 
-func (s *IssueService) ReviewTask(actor, issueID, taskID, verdict, feedback string, completionScore int, artifacts ReviewArtifacts, feedbackDetails []FeedbackDetail, nextStepToken string) (*IssueTask, error) {
+// ReviewTask reviews the latest open Submission for a task (or a specific submission_id).
+// Task status: approved→done, rejected→in_progress (worker can resubmit).
+func (s *IssueService) ReviewTask(actor, issueID, taskID, submissionID, verdict, feedback string, completionScore int, artifacts ReviewArtifacts, feedbackDetails []FeedbackDetail, nextStepToken string) (*IssueTask, error) {
 	if issueID == "" || taskID == "" {
 		return nil, fmt.Errorf("issue_id and task_id are required")
 	}
@@ -405,6 +408,7 @@ func (s *IssueService) ReviewTask(actor, issueID, taskID, verdict, feedback stri
 
 	var result *IssueTask
 	err := s.store.WithLock(func() error {
+		// Validate next_step_token.
 		tokPath := s.store.Path("issues", issueID, "next_steps", nextStepToken+".json")
 		var tok NextStepToken
 		if err := s.store.ReadJSON(tokPath, &tok); err != nil {
@@ -428,10 +432,34 @@ func (s *IssueService) ReviewTask(actor, issueID, taskID, verdict, feedback stri
 		if err != nil {
 			return err
 		}
-		if task.Status != IssueTaskSubmitted {
-			return fmt.Errorf("task '%s' is not submitted (status: %s)", taskID, task.Status)
+
+		// Resolve which submission to review.
+		sub, err := s.resolveSubmissionForReview(issueID, taskID, submissionID)
+		if err != nil {
+			return err
 		}
 
+		_, err = s.reviewSubmissionLocked(issueID, sub.ID, actor, verdict, feedback, completionScore, artifacts, feedbackDetails, nextStepToken)
+		if err != nil {
+			return err
+		}
+		// Ack the lead inbox item.
+		s.ackLeadInboxByRefLocked(issueID, sub.ID)
+
+		// Push review result to worker inbox.
+		if task.ClaimedBy != "" {
+			if item, _ := s.pushToWorkerInboxLocked(issueID, task.ClaimedBy, taskID, InboxTypeReviewResult, sub.ID, actor); item != nil {
+				// For approved results, the worker often ends the conversation immediately.
+				// Auto-ack to avoid piling up "review_result" notifications.
+				if verdict == VerdictApproved {
+					item.Status = InboxDone
+					item.UpdatedAt = NowStr()
+					_ = s.store.WriteJSON(s.store.Path("issues", issueID, "inbox", "workers", task.ClaimedBy, item.ID+".json"), item)
+				}
+			}
+		}
+
+		// Update task state.
 		task.Verdict = verdict
 		task.Feedback = feedback
 		task.CompletionScore = completionScore
@@ -440,6 +468,11 @@ func (s *IssueService) ReviewTask(actor, issueID, taskID, verdict, feedback stri
 		task.NextStepToken = nextStepToken
 		if verdict == VerdictApproved {
 			task.Status = IssueTaskDone
+			// Cache approved artifacts on task for delivery computation.
+			if sub != nil {
+				task.Submitter = sub.WorkerID
+				task.SubmissionArtifacts = sub.Artifacts
+			}
 		} else {
 			task.Status = IssueTaskInProgress
 		}
@@ -459,7 +492,24 @@ func (s *IssueService) ReviewTask(actor, issueID, taskID, verdict, feedback stri
 		if verdict == VerdictApproved {
 			eventType = EventIssueTaskResolved
 		}
-		return s.appendEventLocked(issueID, IssueEvent{Type: eventType, IssueID: issueID, TaskID: task.ID, Actor: actor, Detail: verdict, Refs: "", ReviewArtifacts: &artifacts, FeedbackDetails: feedbackDetails, CompletionScore: completionScore, NextStep: &tok.NextStep, NextStepToken: nextStepToken, Timestamp: NowStr()})
+		subID := ""
+		if sub != nil {
+			subID = sub.ID
+		}
+		return s.appendEventLocked(issueID, IssueEvent{
+			Type:            eventType,
+			IssueID:         issueID,
+			TaskID:          task.ID,
+			Actor:           actor,
+			Detail:          verdict,
+			SubmissionID:    subID,
+			ReviewArtifacts: &artifacts,
+			FeedbackDetails: feedbackDetails,
+			CompletionScore: completionScore,
+			NextStep:        &tok.NextStep,
+			NextStepToken:   nextStepToken,
+			Timestamp:       NowStr(),
+		})
 	})
 	if err != nil {
 		return nil, err
