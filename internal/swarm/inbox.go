@@ -2,6 +2,7 @@ package swarm
 
 import (
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -87,6 +88,8 @@ func (s *IssueService) claimAcceptorDeliveryInboxItemLocked(claimedBy string) (*
 		return nil, err
 	}
 
+	// Collect and sort by creation time (newest first)
+	var items []*InboxItem
 	nowMs := time.Now().UnixMilli()
 	for _, f := range files {
 		var item InboxItem
@@ -106,15 +109,22 @@ func (s *IssueService) claimAcceptorDeliveryInboxItemLocked(claimedBy string) (*
 		if item.Status != InboxPending {
 			continue
 		}
+		items = append(items, &item)
+	}
+
+	sort.Slice(items, func(i, j int) bool {
+		return items[i].CreatedAt > items[j].CreatedAt
+	})
+
+	for _, item := range items {
 		item.Status = InboxProcessing
 		item.ClaimedBy = claimedBy
 		item.ClaimExpiresAtMs = nowMs + int64(inboxClaimTTLSec)*1000
 		item.UpdatedAt = NowStr()
-		if err := s.store.WriteJSON(f, &item); err != nil {
+		if err := s.store.WriteJSON(s.store.Path("deliveries", "inbox", "acceptor", item.ID+".json"), item); err != nil {
 			return nil, err
 		}
-		copy := item
-		return &copy, nil
+		return item, nil
 	}
 	return nil, nil
 }

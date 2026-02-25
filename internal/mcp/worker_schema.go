@@ -11,6 +11,7 @@ func injectWorkerIDIntoTools(role string, tools []ToolDefinition) []ToolDefiniti
 	// This includes locks and task-related tools to prevent cross-worker operations.
 	// Note: role_code is injected separately for all tools when configured.
 	workerRequired := map[string]bool{
+		"waitIssueTasks":       true,
 		"claimIssueTask":       true,
 		"submitIssueTask":      true,
 		"askIssueTask":         true,

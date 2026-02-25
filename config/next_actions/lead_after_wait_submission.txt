@@ -1,3 +1,3 @@
 Next: review the latest submission (reviewIssueTask), then go back to waiting for the next signal.
-务必严苛审视，仔细推理分析并处理 worker 的提交，严格判断该 task 实现的正确性
+务必严苛审视，仔细推理分析 worker 的提交，严格判断该 task 实现的正确性
 If you need more evidence (tests/logs), reject with explicit feedback and required verification.

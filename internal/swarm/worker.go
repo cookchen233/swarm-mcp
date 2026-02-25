@@ -49,6 +49,14 @@ func (w *WorkerService) Register(workerID string) (*Worker, error) {
 	return result, err
 }
 
+func (w *WorkerService) Exists(workerID string) bool {
+	workerID = strings.TrimSpace(workerID)
+	if workerID == "" {
+		return false
+	}
+	return w.store.Exists("workers", workerID+".json")
+}
+
 func (w *WorkerService) Get(workerID string) (*Worker, error) {
 	if workerID == "" {
 		return nil, fmt.Errorf("worker_id is required")

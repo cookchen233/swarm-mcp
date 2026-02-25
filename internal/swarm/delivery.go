@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -21,6 +22,15 @@ func validateTestEvidence(e TestEvidence) error {
 	}
 	if _, err := trimRequired("test_evidence.doc_path", e.DocPath); err != nil {
 		return err
+	}
+	// Validate doc_path format: issue-xxx-test-steps.md where xxx contains letters, numbers, or hyphens
+	docPath := filepath.Base(e.DocPath)
+	matched, err := regexp.MatchString(`^issue-[a-zA-Z0-9-]+-test-steps\.md$`, docPath)
+	if err != nil {
+		return fmt.Errorf("test_evidence.doc_path regex validation error: %v", err)
+	}
+	if !matched {
+		return fmt.Errorf("test_evidence.doc_path must match format 'issue-xxx-test-steps.md' where xxx contains letters, numbers, or hyphens (got: %s)", docPath)
 	}
 	if len(e.DocCommands) == 0 {
 		return fmt.Errorf("test_evidence.doc_commands is required")
@@ -127,6 +137,14 @@ func (s *IssueService) CreateDelivery(actor, issueID, summary, refs string, arti
 			return fmt.Errorf("issue '%s' not found", issueID)
 		}
 
+		var issue Issue
+		if err := s.store.ReadJSON(s.store.Path("issues", issueID, "issue.json"), &issue); err != nil {
+			return err
+		}
+		if issue.Status != IssueOpen && issue.Status != IssueInProgress {
+			return fmt.Errorf("cannot submit delivery: issue status is '%s', must be 'open' or 'in_progress'", issue.Status)
+		}
+
 		d := &Delivery{
 			ID:               GenID("delivery"),
 			IssueID:          issueID,
@@ -190,6 +208,31 @@ func (s *IssueService) WaitDeliveries(status string, timeoutSec, limit int) ([]D
 		if timeExpired(deadline) {
 			break
 		}
+
+		// Backfill/compat: deliveries may exist in open status but have no inbox item (legacy data).
+		// In that case, claim directly instead of blocking forever on inbox.
+		s.SweepExpired()
+		existing, err := s.ListDeliveries(DeliveryOpen, "", "", "")
+		if err != nil {
+			return nil, err
+		}
+		for _, cand := range existing {
+			if timeExpired(deadline) {
+				break
+			}
+			d, err := s.ClaimDelivery("acceptor", cand.ID, 0)
+			if err != nil {
+				continue // Try next delivery
+			}
+			out = append(out, *d)
+			if len(out) >= limit {
+				break
+			}
+		}
+		if len(out) > 0 {
+			break
+		}
+
 		item, err := s.claimAcceptorDeliveryInboxBlocking("acceptor", int(time.Until(deadline).Seconds()))
 		if err != nil {
 			return nil, err

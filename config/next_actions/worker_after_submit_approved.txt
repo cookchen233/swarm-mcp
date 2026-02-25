@@ -1,0 +1,3 @@
+Next: interpret the lead review result included in this response.
+If the task is approved: keep waiting for more work (waitIssueTasks).
+If the lead provided any next-step instructions in feedback/review_artifacts, follow them.

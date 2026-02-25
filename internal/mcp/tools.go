@@ -566,10 +566,9 @@ func allTools() []ToolDefinition {
 		// === Workers ===
 		{
 			Name:        "registerWorker",
-			Description: "Register (or generate) a worker identity and return the worker record. If worker_id is omitted, server generates one.",
+			Description: "Register a new worker identity and return the worker record.",
 			InputSchema: obj(
 				prop("session_id", "string", "Optional session id (cookie-like)."),
-				prop("worker_id", "string", "Worker ID (optional). If omitted, server generates one."),
 			),
 		},
 		{
@@ -747,7 +746,7 @@ func allToolsForRole(role string) []ToolDefinition {
 	// 3) session schema finalization (oneOf branches must include all required fields)
 	base = injectWorkerIDIntoTools(role, base)
 	base = injectRoleCodeIntoTools(role, base)
-	base = injectSessionIntoTools(base)
+	base = injectSessionIntoTools(role, base)
 	allowed := toolAllowSetForRole(role)
 	if allowed == nil {
 		// Unknown role: expose everything (useful for local debugging).

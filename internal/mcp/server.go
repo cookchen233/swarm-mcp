@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -71,8 +72,8 @@ func (s *Server) getNextActions(key string, fallback []string) []string {
 	if key == "" {
 		return fallback
 	}
-	path := "config/next_actions/" + key + ".txt"
-	bs, err := os.ReadFile(path)
+	configPath := filepath.Join("config", "next_actions", key+".txt")
+	bs, err := readConfigUpward(configPath)
 	if err != nil {
 		return fallback
 	}
@@ -89,6 +90,48 @@ func (s *Server) getNextActions(key string, fallback []string) []string {
 		return fallback
 	}
 	return out
+}
+
+func (s *Server) getNextActionText() string {
+	configPath := filepath.Join("config", "next_action.txt")
+	bs, err := readConfigUpward(configPath)
+	if err != nil {
+		// Return default text if file doesn't exist
+		return "All tasks completed. Please proceed with delivery and testing."
+	}
+	return string(bs)
+}
+
+func readConfigUpward(relPath string) ([]byte, error) {
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		p := filepath.Clean(filepath.Join(exeDir, "..", relPath))
+		if bs, err := os.ReadFile(p); err == nil {
+			return bs, nil
+		}
+		p = filepath.Clean(filepath.Join(exeDir, relPath))
+		if bs, err := os.ReadFile(p); err == nil {
+			return bs, nil
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	dir := cwd
+	for {
+		p := filepath.Join(dir, relPath)
+		bs, err := os.ReadFile(p)
+		if err == nil {
+			return bs, nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil, err
+		}
+		dir = parent
+	}
 }
 
 func (s *Server) Run() error {
@@ -131,9 +174,8 @@ func (s *Server) Run() error {
 }
 
 func (s *Server) memberIDForArgs(toolName string, args map[string]any) (string, error) {
-	// Strong constraint: all tools MUST carry a valid session_id.
 	if args == nil {
-		return "", fmt.Errorf("session_id is required")
+		args = map[string]any{}
 	}
 	var sessionID string
 	v, exists := args["session_id"]
@@ -150,6 +192,13 @@ func (s *Server) memberIDForArgs(toolName string, args map[string]any) (string, 
 		}
 	}
 	sessionID = strings.TrimSpace(sessionID)
+	requireSession := toolRequiresSession(s.cfg.Role, toolName)
+	if !requireSession {
+		// For tools that don't require session, never validate session_id.
+		// This avoids optional session_id breaking calls when it's invalid/outdated.
+		// Use a stable member id per role to keep behavior deterministic.
+		return "anon:" + strings.TrimSpace(s.cfg.Role), nil
+	}
 	if sessionID == "" {
 		return "", fmt.Errorf("session_id is required")
 	}
@@ -1026,7 +1075,9 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if wid == "" {
 			return nil, fmt.Errorf("worker_id is required")
 		}
-		_, _ = s.workerSvc.Register(wid)
+		if !s.workerSvc.Exists(wid) {
+			return nil, fmt.Errorf("unknown worker_id: please call registerWorker to obtain a new worker_id")
+		}
 		task, err := s.issueSvc.ClaimTask(str(args, "issue_id"), str(args, "task_id"), wid, str(args, "next_step_token"))
 		if err != nil {
 			return nil, err
@@ -1064,12 +1115,19 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if task.Status == swarm.IssueTaskDone {
-			m["next_actions"] = s.getNextActions("worker_after_submit", []string{
-				"Next: interpret the lead review result included in this response.",
-				"If approved: follow the lead's next-step instructions (if any) or finish/stand by for further work.",
-			})
+		key := "worker_after_submit"
+		switch strings.TrimSpace(task.Verdict) {
+		case swarm.VerdictApproved:
+			key = "worker_after_submit_approved"
+		case swarm.VerdictRejected:
+			key = "worker_after_submit_rejected"
 		}
+		m["next_actions"] = s.getNextActions(key, s.getNextActions("worker_after_submit", []string{
+			"Next: interpret the lead review result included in this response.",
+			"If approved: follow the lead's next-step instructions (if any) or finish/stand by for further work.",
+			"If rejected: follow feedback, adjust code/tests, and submitIssueTask again.",
+			"If you need clarification: askIssueTask.",
+		}))
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "reviewIssueTask":
 		art := objMap(args, "artifacts")
@@ -1164,8 +1222,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return addLeaseExpiresAt(addNow(m)), nil
 	case "listIssueTasks":
-		issueID := str(args, "issue_id")
-		tasks, err := s.issueSvc.ListTasks(issueID, "")
+		tasks, err := s.issueSvc.ListTasks(str(args, "issue_id"), "")
 		if err != nil {
 			return nil, err
 		}
@@ -1192,8 +1249,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		}
 		return out, nil
 	case "listIssueOpenedTasks":
-		issueID := str(args, "issue_id")
-		tasks, err := s.issueSvc.ListTasks(issueID, swarm.IssueTaskOpen)
+		tasks, err := s.issueSvc.ListTasks(str(args, "issue_id"), swarm.IssueTaskOpen)
 		if err != nil {
 			return nil, err
 		}
@@ -1311,7 +1367,7 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 
 	// === Workers ===
 	case "registerWorker":
-		return s.workerSvc.Register(str(args, "worker_id"))
+		return s.workerSvc.Register("")
 	case "listWorkers":
 		return s.workerSvc.List()
 	case "getWorker":

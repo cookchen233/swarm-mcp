@@ -304,7 +304,14 @@ echo ""
 
 # --- Test 3: Worker claims and submits, lead reviews ---
 echo "[Test 3] Claim Issue Task"
-EMPLOYEE_ID="E0001"
+resp=$(tool_call 60 "registerWorker" "$WORKER_SESSION" '{}')
+assert_contains "registerWorker ok" "$resp" "w_"
+EMPLOYEE_ID=$(echo "$resp" | grep -oE 'w_[0-9]+_[0-9a-f]+' | head -1)
+if [ -z "$EMPLOYEE_ID" ]; then
+    echo "FAILED to parse EMPLOYEE_ID(worker_id): $resp"
+    exit 1
+fi
+
 resp=$(tool_call 7 "claimIssueTask" "$WORKER_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"task_id\":\"$TASK_ID\",\"worker_id\":\"$EMPLOYEE_ID\"}")
 assert_contains "claimed in_progress" "$resp" "in_progress"
 
@@ -364,7 +371,7 @@ echo ""
 
 # --- Test 4: Delivery acceptance ---
 echo "[Test 4] submitDelivery (async)"
-tool_call_async 20 "submitDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"summary\":\"deliver\",\"artifacts\":{\"changed_files\":[\"a.txt\"],\"reviewed_refs\":[\"a.txt\"],\"test_cases\":[\"go test ./...\"],\"test_result\":\"passed\"},\"test_evidence\":{\"script_path\":\"scripts/test-issue-integration.sh\",\"script_cmd\":\"bash scripts/test-issue-integration.sh\",\"script_passed\":true,\"script_result\":\"ok\",\"doc_path\":\"docs/test-issue-integration.md\",\"doc_commands\":[\"echo hi\"],\"doc_results\":[{\"command\":\"echo hi\",\"passed\":true,\"exit_code\":0,\"output\":\"hi\"}],\"doc_passed\":true},\"timeout_sec\":20}"
+tool_call_async 20 "submitDelivery" "$LEAD_SESSION" "{\"issue_id\":\"$ISSUE_ID\",\"summary\":\"deliver\",\"artifacts\":{\"changed_files\":[\"a.txt\"],\"reviewed_refs\":[\"a.txt\"],\"test_cases\":[\"go test ./...\"],\"test_result\":\"passed\"},\"test_evidence\":{\"script_path\":\"scripts/test-issue-integration.sh\",\"script_cmd\":\"bash scripts/test-issue-integration.sh\",\"script_passed\":true,\"script_result\":\"ok\",\"doc_path\":\"docs/issue-${ISSUE_ID}-test-steps.md\",\"doc_commands\":[\"echo hi\"],\"doc_results\":[{\"command\":\"echo hi\",\"passed\":true,\"exit_code\":0,\"output\":\"hi\"}],\"doc_passed\":true},\"timeout_sec\":20}"
 
 echo "[Test 4.1] Acceptor waits + reviews"
 resp=""
