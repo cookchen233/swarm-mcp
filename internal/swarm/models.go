@@ -212,7 +212,7 @@ type Issue struct {
 
 type DocRef struct {
 	Name string `json:"name"`
-	Path string `json:"path"`
+	Path string `json:"-"`
 }
 
 type SubmissionArtifacts struct {
@@ -335,7 +335,7 @@ type IssueTask struct {
 	DocPaths            []string            `json:"doc_paths"`
 	RequiredIssueDocs   []string            `json:"required_issue_docs"`
 	RequiredTaskDocs    []string            `json:"required_task_docs"`
-	TaskDocs            []DocRef            `json:"task_docs"`
+	TaskDocs            []DocRef            `json:"-"`
 	Points              int                 `json:"points"`
 	Status              string              `json:"status"`
 	ReservedToken       string              `json:"reserved_token"`

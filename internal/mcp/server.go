@@ -951,41 +951,102 @@ func (s *Server) dispatch(tool string, args map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		issueDocs := map[string]string{}
-		for _, d := range issue.Docs {
-			c, err := s.docsSvc.ReadIssueDoc(issueID, d.Name)
-			if err != nil {
-				return nil, err
-			}
-			issueDocs[d.Name] = c
-		}
-		taskDocs := map[string]map[string]string{}
-		for _, t := range tasks {
-			m := map[string]string{}
-			for _, d := range t.TaskDocs {
-				c, err := s.docsSvc.ReadTaskDoc(issueID, t.ID, d.Name)
-				if err != nil {
-					return nil, err
-				}
-				m[d.Name] = c
-			}
-			taskDocs[t.ID] = m
-		}
-		events, err := s.issueSvc.ReadAllEvents(issueID)
-		if err != nil {
-			return nil, err
-		}
 		issueMap, err := toMap(issue)
 		if err != nil {
 			return nil, err
 		}
 		issueMap = addLeaseExpiresAt(addNow(issueMap))
+		// Build a compact delivery-focused summary for lead/acceptor.
+		taskSummaries := make([]map[string]any, 0, len(tasks))
+		changedFilesSet := map[string]struct{}{}
+		reviewedRefsSet := map[string]struct{}{}
+		testCasesSet := map[string]struct{}{}
+		linksSet := map[string]struct{}{}
+		submitterSet := map[string]struct{}{}
+		var notDone []string
+		doneCount := 0
+		for _, t := range tasks {
+			if t.Status == swarm.IssueTaskDone {
+				doneCount++
+			} else {
+				notDone = append(notDone, t.ID+":"+t.Status)
+			}
+			if strings.TrimSpace(t.Submitter) != "" {
+				submitterSet[strings.TrimSpace(t.Submitter)] = struct{}{}
+			}
+			for _, f := range t.SubmissionArtifacts.ChangedFiles {
+				f = strings.TrimSpace(f)
+				if f == "" {
+					continue
+				}
+				changedFilesSet[f] = struct{}{}
+			}
+			for _, r := range t.ReviewArtifacts.ReviewedRefs {
+				r = strings.TrimSpace(r)
+				if r == "" {
+					continue
+				}
+				reviewedRefsSet[r] = struct{}{}
+			}
+			for _, c := range t.SubmissionArtifacts.TestCases {
+				c = strings.TrimSpace(c)
+				if c == "" {
+					continue
+				}
+				testCasesSet[c] = struct{}{}
+			}
+			for _, l := range t.SubmissionArtifacts.Links {
+				l = strings.TrimSpace(l)
+				if l == "" {
+					continue
+				}
+				linksSet[l] = struct{}{}
+			}
+			taskSummaries = append(taskSummaries, map[string]any{
+				"task_id":          t.ID,
+				"subject":          t.Subject,
+				"status":           t.Status,
+				"claimed_by":       t.ClaimedBy,
+				"submitter":        t.Submitter,
+				"summary":          t.SubmissionArtifacts.Summary,
+				"test_result":      t.SubmissionArtifacts.TestResult,
+				"verdict":          t.Verdict,
+				"completion_score": t.CompletionScore,
+				"review_summary":   t.ReviewArtifacts.ReviewSummary,
+				"updated_at":       t.UpdatedAt,
+			})
+		}
+		sort.Strings(notDone)
+		sort.Slice(taskSummaries, func(i, j int) bool {
+			ai, _ := taskSummaries[i]["task_id"].(string)
+			aj, _ := taskSummaries[j]["task_id"].(string)
+			return ai < aj
+		})
+
+		toSortedSlice := func(m map[string]struct{}) []string {
+			out := make([]string, 0, len(m))
+			for k := range m {
+				out = append(out, k)
+			}
+			sort.Strings(out)
+			return out
+		}
+		deliverySummary := map[string]any{
+			"task_total":     len(tasks),
+			"task_done":      doneCount,
+			"task_not_done":  notDone,
+			"submitters":     toSortedSlice(submitterSet),
+			"changed_files":  toSortedSlice(changedFilesSet),
+			"reviewed_refs":  toSortedSlice(reviewedRefsSet),
+			"test_cases":     toSortedSlice(testCasesSet),
+			"links":          toSortedSlice(linksSet),
+			"task_summaries": taskSummaries,
+			"server_now_ms":  nowMs,
+			"server_now":     nowStr,
+		}
 		bundle := map[string]any{
-			"issue":      issueMap,
-			"tasks":      tasks,
-			"issue_docs": issueDocs,
-			"task_docs":  taskDocs,
-			"events":     events,
+			"issue":            issueMap,
+			"delivery_summary": deliverySummary,
 		}
 		return bundle, nil
 

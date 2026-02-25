@@ -211,6 +211,7 @@ Phase 2（协作注入期）
 - 开发中有任务不确定/或信息不足时请务必使用 askIssueTask(kind=question|blocker) 获取 lead 的决策，然后继续推进
 - 你可访问该项目其他未在 task 中包含的文档, 你拥有该项目所有读写权限
 - 领取任务后务必查阅其有关的所有文档与信息，并仔细推理分析每个细节，谨慎周密地完成该任务
+- 文档需通过远端下载
 - **强约束** 完成任务后提交：submitIssueTask，根据返回的 next_actions 继续进行下一步
 - **强约束** 当所有 tasks 被完成后继续调用 waitIssues 或 waitIssueTasks 直至没有任何 open 状态的 issue
 - **强约束** 务必遵循接口工具返回的 next_actions

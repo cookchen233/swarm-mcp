@@ -32,7 +32,7 @@ func (d *DocsService) WriteSharedDoc(name, content string) (string, error) {
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		return "", err
 	}
-	return p, nil
+	return name, nil
 }
 
 func (d *DocsService) ReadSharedDoc(name string) (string, error) {
@@ -78,7 +78,7 @@ func (d *DocsService) WriteIssueDoc(issueID, name, content string) (string, erro
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		return "", err
 	}
-	return p, nil
+	return name, nil
 }
 
 func (d *DocsService) ReadIssueDoc(issueID, name string) (string, error) {
@@ -127,7 +127,7 @@ func (d *DocsService) WriteTaskDoc(issueID, taskID, name, content string) (strin
 	if err := os.WriteFile(p, []byte(content), 0644); err != nil {
 		return "", err
 	}
-	return p, nil
+	return name, nil
 }
 
 func (d *DocsService) ReadTaskDoc(issueID, taskID, name string) (string, error) {
