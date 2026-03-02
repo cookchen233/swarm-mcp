@@ -360,7 +360,41 @@ func (s *Server) handle(req JSONRPCRequest) *JSONRPCResponse {
 		resp := NewResultResponse(req.ID, map[string]any{"resources": []any{}})
 		return &resp
 	case "tools/list":
-		resp := NewResultResponse(req.ID, map[string]any{"tools": allToolsForRole(s.cfg.Role)})
+		tools := allToolsForRole(s.cfg.Role)
+		disabled := map[string]struct{}{}
+		if pm, ok := req.Params.(map[string]any); ok {
+			if v, ok2 := pm["disabledTools"]; ok2 && v != nil {
+				switch xs := v.(type) {
+				case []any:
+					for _, it := range xs {
+						n := strings.TrimSpace(fmt.Sprint(it))
+						if n != "" {
+							disabled[n] = struct{}{}
+						}
+					}
+				case []string:
+					for _, it := range xs {
+						n := strings.TrimSpace(it)
+						if n != "" {
+							disabled[n] = struct{}{}
+						}
+					}
+				default:
+					// ignore invalid types
+				}
+			}
+		}
+		if len(disabled) > 0 {
+			filtered := make([]ToolDefinition, 0, len(tools))
+			for _, t := range tools {
+				if _, ok := disabled[t.Name]; ok {
+					continue
+				}
+				filtered = append(filtered, t)
+			}
+			tools = filtered
+		}
+		resp := NewResultResponse(req.ID, map[string]any{"tools": tools})
 		return &resp
 	case "tools/call":
 		resp := s.handleToolsCall(req.ID, req.Params)
